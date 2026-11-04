@@ -6,19 +6,20 @@
 
 ## 它长什么样
 
-- 无边框、透明、置顶，站在屏幕右下角；**按住就能拖**，滚轮调大小（90–320 宽），位置与大小分别记在 `%APPDATA%\ivan-pet-desktop\pos.json`、`%APPDATA%\ivan-pet\size.json`
+- 无边框、透明、置顶，站在屏幕右下角；**按住他别松就能拖**（15ms 计时器读光标位置跟手移动，DPI 换算过，和鼠标 1:1，不会跑得比手快）；滚轮调大小（90–320 宽）；位置与大小分别记在 `%APPDATA%\ivan-pet\pos.json`、`%APPDATA%\ivan-pet\size.json`，越界坐标会被夹回工作区
 - 跟着会话状态换动作：`idle`（呼吸 + 随机眨眼）、`thinking`、`coding`、`done`、`error`、`pat`（被摸头）
 - 一轮任务结束弹一条提示条：「任务好了 / 点这里回去看看」，带提示音；点提示条把 DSH 拉回前台
-- **点一下就跟他说话**：弹出一个小输入框，回车发送；宿主把话交给当前会话的默认模型，用 Ivan 的口气回你一两句
-- 右键 = 回 DSH
+- **右下角那个「说」按钮**：点它开输入框（回车发送、Esc 关）；输入框右上角有 `×` 关掉。也可以直接点他本人，一样弹输入框
+- **托盘图标**（通知区域，图标就是他的头）：双击 = 说话；右键菜单 = 跟我说话 / 回 DSH 看看 / 收起桌宠 / 退出。桌宠被拖丢了、或者点不到的时候，从托盘里找回来
+- 右键点他 = 回 DSH
 
 ## 依赖
 
 | 项 | 说明 |
 | --- | --- |
-| 系统 | Windows 10/11（WPF + PowerShell 5.1） |
+| 系统 | Windows 10/11（WPF + PowerShell 5.1 + WinForms 托盘） |
 | DSH | 0.2.x |
-| 可选 | `ivan-pet` 插件提供 `/ivan-pet/state`；没有就一直是 `idle`，窗口照样在 |
+| 可选 | `ivan-pet` 插件提供 `/ivan-pet/state` 与 `/ivan-pet/chat`；没有的话一直是 `idle`，窗口照样在，说话会提示「还没连上」 |
 
 ## 安装
 
@@ -34,17 +35,19 @@ plugin_manager install_bundle  target: "link:D:\\path\\to\\dsh-ivan-pet-desktop"
 - id: ivan-pet-desktop
   name: dsh-ivan-pet-desktop
   config:
-    assets: 'D:/somewhere/assets'   # 可选：换一套贴图（idle/blink/thinking/coding/done/error/pat.png）
+    assets: 'D:/somewhere/assets'   # 可选：换一套贴图（idle/blink/thinking/coding/done/error/pat.png，另需 ivan.ico 作托盘图标）
     extraArgs: []                   # 可选：透传给 pet.ps1 的参数，例如 ['-Width','260']
 ```
 
 ## 贴图规格
 
-七张 PNG，透明底，角色**底部对齐**、水平居中，同一画布尺寸（推荐 300×564，内容高 556）：
+七张 PNG + 一个 ICO，透明底，角色**底部对齐**、水平居中，同一画布尺寸（推荐 300×564，内容高 556）：
 
 ```
-idle.png  blink.png  thinking.png  coding.png  done.png  error.png  pat.png
+idle.png  blink.png  thinking.png  coding.png  done.png  error.png  pat.png  ivan.ico
 ```
+
+`ivan.ico` 取头部那截（256×256，含 16/24/32/48/64/128 多尺寸），做托盘图标用。
 
 ## 它是怎么工作的
 
@@ -52,6 +55,8 @@ idle.png  blink.png  thinking.png  coding.png  done.png  error.png  pat.png
 DSH 宿主 ──apply()──> spawn powershell.exe -File pet/pet.ps1 -Assets pet/assets
                               │
                               ├─ WPF 透明置顶窗（DispatcherTimer 轮询 /ivan-pet/state）
+                              ├─ 拖拽计时器（15ms，读 Cursor.Position，按 DPI 换算成 DIP）
+                              ├─ NotifyIcon 托盘图标 + 右键菜单
                               └─ 插件停用 ── dispose() ──> child.kill()
 ```
 
@@ -62,7 +67,10 @@ DSH 宿主 ──apply()──> spawn powershell.exe -File pet/pet.ps1 -Assets p
 1. **PowerShell 5.1 只认带 BOM 的 UTF-8**。`pet.ps1` 里全是中文，文件一旦变成无 BOM，PS 按 ANSI 读 → `ParserError: 字符串缺少终止符`。用 `[IO.File]::WriteAllText($p, $t, [Text.UTF8Encoding]::new($true))` 落盘，并统一成 CRLF。
 2. **别在 .NET 线程回调里跑 PowerShell 脚本块**（`.NET Timer`、`Task.Run` 之类）——没有 runspace，会静默失败。这里全部用 `DispatcherTimer`，跑在 UI 线程上。
 3. **DPI**：150% 缩放屏上，DPI-unaware 的截图和窗口坐标是两套尺度。脚本开头用 `SetProcessDpiAwarenessContext(-4)` 按物理像素工作，否则提示条会偏。
-4. **XamlReader 那条路走不通**：`[Windows.Markup.XamlReader]::Load()` 在这个环境里窗口根本没创建出来（`EnumWindows` 查不到），所以窗口是用代码一行行搭的。
+4. **`Window.DragMove()` 在这台机器上会抛异常**（被 try/catch 吞掉 → 看起来「拖不动」）。改成自己算位移。
+5. **位移必须除以 DPI 缩放**：`Cursor.Position` 是物理像素，`Window.Left/Top` 是 DIP。150% 屏上直接相减，窗口会跑得比手快 1.5 倍——一路拖到屏幕外，还会把越界坐标写进 `pos.json`，下次启动就「消失了」。
+6. **别用命令行关键字杀进程**：`Where-Object { $_.CommandLine -like '*pet.ps1*' }` 会匹配到正在执行这条命令的 shell 自己。按完整路径匹配，并排除 `$PID`。
+7. **XamlReader 那条路走不通**：`[Windows.Markup.XamlReader]::Load()` 在这个环境里窗口根本没创建出来（`EnumWindows` 查不到），所以窗口是用代码一行行搭的。
 
 ## License
 

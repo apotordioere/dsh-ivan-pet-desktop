@@ -105,6 +105,30 @@ $tg.Children.Add($move) | Out-Null
 $img.RenderTransform = $tg
 
 $grid.Children.Add($img) | Out-Null
+
+# 说话按钮：常驻，点它开输入框
+$chatBtn = New-Object System.Windows.Controls.Border
+$chatBtn.Width = 26
+$chatBtn.Height = 26
+$chatBtn.CornerRadius = New-Object System.Windows.CornerRadius 13
+$chatBtn.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(210, 255, 255, 255))
+$chatBtn.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(60, 27, 42, 74))
+$chatBtn.BorderThickness = New-Object System.Windows.Thickness 1
+$chatBtn.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+$chatBtn.VerticalAlignment = [System.Windows.VerticalAlignment]::Bottom
+$chatBtn.Margin = New-Object System.Windows.Thickness(0, 0, 4, 6)
+$chatBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+$chatBtn.ToolTip = '跟我说话'
+$chatBtnText = New-Object System.Windows.Controls.TextBlock
+$chatBtnText.Text = '说'
+$chatBtnText.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$chatBtnText.FontSize = 11
+$chatBtnText.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
+$chatBtnText.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+$chatBtnText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+$chatBtn.Child = $chatBtnText
+$grid.Children.Add($chatBtn) | Out-Null
+
 $win.Content = $grid
 
 # 位置
@@ -117,13 +141,16 @@ if (Test-Path $script:PosFile) {
     if ($null -ne $p.left -and $null -ne $p.top) { $left = [double]$p.left; $top = [double]$p.top }
   } catch { }
 }
+# 夹回工作区：位置文件里可能是旧版本留下的越界坐标
+if ($left -lt ($wa.Left - 4) -or $left -gt ($wa.Right - $Width + 4)) { $left = $wa.Right - $Width - 28 }
+if ($top -lt ($wa.Top - 4) -or $top -gt ($wa.Bottom - $Height + 4)) { $top = $wa.Bottom - $Height - 6 }
 $win.Left = $left
 $win.Top = $top
 
 function Save-Pos {
   try {
     New-Item -ItemType Directory -Force -Path (Split-Path $script:PosFile) | Out-Null
-    @{ left = [math]::Round($win.Left); top = [math]::Round($win.Top) } | ConvertTo-Json | Set-Content -Path $script:PosFile -Encoding UTF8
+    @{ left = [math]::Round([math]::Min([math]::Max($win.Left, $wa.Left), $wa.Right - $win.Width)); top = [math]::Round([math]::Min([math]::Max($win.Top, $wa.Top), $wa.Bottom - $win.Height)) } | ConvertTo-Json | Set-Content -Path $script:PosFile -Encoding UTF8
   } catch { }
 }
 
@@ -303,7 +330,7 @@ $chatWin.Topmost = $true
 $chatWin.ShowInTaskbar = $false
 $chatWin.ResizeMode = [System.Windows.ResizeMode]::NoResize
 $chatWin.Width = 300
-$chatWin.Height = 92
+$chatWin.Height = 112
 $chatWin.Visibility = [System.Windows.Visibility]::Collapsed
 
 $chatBorder = New-Object System.Windows.Controls.Border
@@ -330,7 +357,36 @@ $chatBox.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.W
 $chatBox.CaretBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
 $chatBox.AcceptsReturn = $false
 
+$chatTitle = New-Object System.Windows.Controls.TextBlock
+$chatTitle.Text = '跟 Ivan 说'
+$chatTitle.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$chatTitle.FontSize = 11
+$chatTitle.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
+$chatTitle.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+$chatClose = New-Object System.Windows.Controls.Button
+$chatClose.Content = '×'
+$chatClose.Width = 20
+$chatClose.Height = 20
+$chatClose.FontSize = 13
+$chatClose.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$chatClose.Padding = New-Object System.Windows.Thickness 0
+$chatClose.BorderThickness = New-Object System.Windows.Thickness 0
+$chatClose.Background = [System.Windows.Media.Brushes]::Transparent
+$chatClose.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(140, 152, 176))
+$chatClose.Cursor = [System.Windows.Input.Cursors]::Hand
+$chatClose.ToolTip = '关掉'
+$chatClose.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+$chatHead = New-Object System.Windows.Controls.DockPanel
+$chatHead.LastChildFill = $true
+[System.Windows.Controls.DockPanel]::SetDock($chatClose, [System.Windows.Controls.Dock]::Right)
+$chatHead.Children.Add($chatClose) | Out-Null
+$chatHead.Children.Add($chatTitle) | Out-Null
+$chatHead.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
+
 $chatStack = New-Object System.Windows.Controls.StackPanel
+$chatStack.Children.Add($chatHead) | Out-Null
 $chatStack.Children.Add($chatHint) | Out-Null
 $chatStack.Children.Add($chatBox) | Out-Null
 $chatBorder.Child = $chatStack
@@ -355,6 +411,8 @@ function Open-Chat {
 
 function Close-Chat { $chatWin.Visibility = [System.Windows.Visibility]::Collapsed }
 
+$chatClose.Add_Click({ Close-Chat })
+
 function Send-Chat {
   $text = ($chatBox.Text).Trim()
   Close-Chat
@@ -378,6 +436,29 @@ $script:dragStartX = 0.0
 $script:dragStartY = 0.0
 $script:dragOriginLeft = 0.0
 $script:dragOriginTop = 0.0
+$script:dpi = 1.0
+
+# 用 15ms 计时器读光标位置来移动窗口：比在每个 MouseMove 里改 Left/Top 跟手得多
+$script:dragTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:dragTimer.Interval = [TimeSpan]::FromMilliseconds(15)
+$script:dragTimer.Add_Tick({
+    if (-not $script:dragging) { return }
+    try {
+      $c = [System.Windows.Forms.Cursor]::Position
+      $dx = ($c.X - $script:dragStartX) / $script:dpi
+      $dy = ($c.Y - $script:dragStartY) / $script:dpi
+      if (-not $script:dragMoved) {
+        if ([math]::Abs($dx) -gt 2 -or [math]::Abs($dy) -gt 2) {
+          $script:dragMoved = $true
+          Close-Chat
+        }
+      }
+      if ($script:dragMoved) {
+        $win.Left = $script:dragOriginLeft + $dx
+        $win.Top = $script:dragOriginTop + $dy
+      }
+    } catch { }
+  })
 
 $img.Add_MouseLeftButtonDown({
     try {
@@ -388,30 +469,22 @@ $img.Add_MouseLeftButtonDown({
       $script:dragStartY = $c.Y
       $script:dragOriginLeft = $win.Left
       $script:dragOriginTop = $win.Top
+      try {
+        $src = [System.Windows.PresentationSource]::FromVisual($win)
+        if ($src -and $src.CompositionTarget) { $script:dpi = $src.CompositionTarget.TransformToDevice.M11 }
+      } catch { }
+      if ($script:dpi -le 0) { $script:dpi = 1.0 }
       [void]$img.CaptureMouse()
+      $script:dragTimer.Start()
     } catch { }
   })
 
-$img.Add_MouseMove({
-    if (-not $script:dragging) { return }
-    try {
-      $c = [System.Windows.Forms.Cursor]::Position
-      $dx = $c.X - $script:dragStartX
-      $dy = $c.Y - $script:dragStartY
-      if ((!$script:dragMoved) -and ([math]::Abs($dx) -gt 3 -or [math]::Abs($dy) -gt 3)) {
-        $script:dragMoved = $true
-        Close-Chat
-      }
-      if ($script:dragMoved) {
-        $win.Left = $script:dragOriginLeft + $dx
-        $win.Top = $script:dragOriginTop + $dy
-      }
-    } catch { }
-  })
+# 移动窗口的工作交给 $script:dragTimer（见上），这里不再逐帧改 Left/Top
 
 $img.Add_MouseLeftButtonUp({
     try {
       $script:dragging = $false
+      $script:dragTimer.Stop()
       [void]$img.ReleaseMouseCapture()
       if ($script:dragMoved) {
         Save-Pos
@@ -500,8 +573,70 @@ $ui.Add_Tick({
     }
   })
 
+# ---------- 托盘图标 ----------
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
+
+$script:tray = New-Object System.Windows.Forms.NotifyIcon
+$script:tray.Text = 'Ivan · 桌宠'
+$icoPath = Join-Path $Assets 'ivan.ico'
+if (Test-Path $icoPath) {
+  try { $script:tray.Icon = New-Object System.Drawing.Icon($icoPath) } catch { }
+}
+if (-not $script:tray.Icon) { $script:tray.Icon = [System.Drawing.SystemIcons]::Application }
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayMenu.Font = New-Object System.Drawing.Font('Microsoft YaHei', 9)
+
+$miChat = New-Object System.Windows.Forms.ToolStripMenuItem
+$miChat.Text = '跟我说话'
+$trayMenu.Items.Add($miChat) | Out-Null
+
+$miDsh = New-Object System.Windows.Forms.ToolStripMenuItem
+$miDsh.Text = '回 DSH 看看'
+$trayMenu.Items.Add($miDsh) | Out-Null
+
+$miToggle = New-Object System.Windows.Forms.ToolStripMenuItem
+$miToggle.Text = '收起桌宠'
+$trayMenu.Items.Add($miToggle) | Out-Null
+
+$sep = New-Object System.Windows.Forms.ToolStripSeparator
+$trayMenu.Items.Add($sep) | Out-Null
+
+$miQuit = New-Object System.Windows.Forms.ToolStripMenuItem
+$miQuit.Text = '退出'
+$trayMenu.Items.Add($miQuit) | Out-Null
+
+$script:tray.ContextMenuStrip = $trayMenu
+
+$miChat.Add_Click({ try { $win.Visibility = [System.Windows.Visibility]::Visible; $win.Activate() | Out-Null; Open-Chat } catch { } })
+$miDsh.Add_Click({ Focus-Dsh })
+$miToggle.Add_Click({
+    try {
+      if ($win.Visibility -eq [System.Windows.Visibility]::Visible) {
+        $win.Visibility = [System.Windows.Visibility]::Hidden
+        $miToggle.Text = '放出桌宠'
+      } else {
+        $win.Visibility = [System.Windows.Visibility]::Visible
+        $miToggle.Text = '收起桌宠'
+      }
+    } catch { }
+  })
+$miQuit.Add_Click({
+    try { $script:tray.Visible = $false; $script:tray.Dispose() } catch { }
+    try { $poll.Stop(); $ui.Stop() } catch { }
+    try { $chatWin.Close() } catch { }
+    try { $win.Close() } catch { }
+    [System.Windows.Application]::Current.Shutdown()
+  })
+
+$script:tray.Add_MouseDoubleClick({ try { $win.Visibility = [System.Windows.Visibility]::Visible; Open-Chat } catch { } })
+$script:tray.Visible = $true
+Write-Log 'tray icon on'
+
 $win.Add_Closed({
     $poll.Stop(); $ui.Stop()
+    try { $script:tray.Visible = $false; $script:tray.Dispose() } catch { }
     try { $chatWin.Close() } catch { }
     [System.Windows.Application]::Current.Shutdown()
   })
