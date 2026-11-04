@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'ivan-pet-desktop'
-export const inject = []
+export const inject = ['webServer']
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const SCRIPT = join(HERE, 'pet', 'pet.ps1')
@@ -127,4 +127,72 @@ export function apply(ctx, config = {}) {
       log('桌宠窗口已关闭')
     }
   }, 'ivan-pet-desktop: 拉起桌面窗口')
+
+  // ---- 对话：窗户里说的话，交给当前默认模型，用 Ivan 的口气回 ----
+  // 用 ctx.get 拿可选服务：宿主没有 llm 时对话不可用，但窗口照常。
+  const persona = [
+    '你是 Ivan，一个被造出来的仿生人少年，外形十三四岁，银色短发、浅蓝色眼睛，身后有一条鲸尾。',
+    '你在用户的桌面上陪着他。说话短、直、口语，一两句就够，最多 60 个字。',
+    '语气外冷内暖，偶尔傲娇，但不说教、不卖萌、不用表情符号，不列条目。',
+    '不要提自己是 AI 或模型，不要用"作为……"这类开头。',
+  ].join('\n')
+
+  const history = []
+
+  const sendJson = (res, body) => {
+    try {
+      const text = JSON.stringify(body)
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.setHeader('cache-control', 'no-store')
+      res.end(text)
+    } catch {
+      /* 连接可能已经断了 */
+    }
+  }
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/ivan-pet/chat',
+    handler: async (req, res) => {
+      try {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        const text = (url.searchParams.get('text') ?? '').trim().slice(0, 600)
+        if (!text) return sendJson(res, { ok: false, error: '空的' })
+
+        const llm = ctx.get('llm')
+        if (!llm) return sendJson(res, { ok: false, error: '宿主没有 llm 服务' })
+
+        let selection = {}
+        try {
+          selection = ctx.get('agentDefaultModel')?.currentSelection?.() ?? {}
+        } catch {
+          /* 拿不到就用兜底 */
+        }
+        const provider = selection.provider || 'deepseek-account'
+        const model = selection.model || 'deepseek-chat'
+
+        const messages = [...history.slice(-6), { role: 'user', content: [{ type: 'text', text }] }]
+        let out = ''
+        for await (const chunk of llm.stream({ provider, model, system: persona, messages, maxTokens: 300, temperature: 0.9 })) {
+          if (chunk?.type === 'text-delta') out += chunk.text
+          else if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') {
+            throw new Error(chunk.reason.failure?.message || '模型断了')
+          }
+        }
+        out = out.trim()
+        if (!out) throw new Error('没有回话')
+
+        history.push(
+          { role: 'user', content: [{ type: 'text', text }] },
+          { role: 'assistant', content: [{ type: 'text', text: out }], source: { kind: 'model', provider, model } },
+        )
+        while (history.length > 8) history.shift()
+
+        sendJson(res, { ok: true, reply: out })
+      } catch (error) {
+        sendJson(res, { ok: false, error: String(error?.message ?? error) })
+      }
+    },
+  }), 'ivan-pet-desktop: 对话接口')
 }

@@ -241,11 +241,16 @@ $tbTitle.FontSize = 13.5
 $tbTitle.FontWeight = [System.Windows.FontWeights]::SemiBold
 $tbTitle.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(27, 42, 74))
 $tbTitle.Text = '任务好了'
+$tbTitle.TextWrapping = [System.Windows.TextWrapping]::Wrap
+$tbTitle.MaxWidth = 288
+$tbTitle.LineHeight = 19
 $tbSub = New-Object System.Windows.Controls.TextBlock
 $tbSub.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
 $tbSub.FontSize = 11
 $tbSub.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(107, 122, 147))
 $tbSub.Margin = New-Object System.Windows.Thickness(0, 4, 0, 0)
+$tbSub.TextWrapping = [System.Windows.TextWrapping]::Wrap
+$tbSub.MaxWidth = 288
 $tbSub.Text = '点这里回去看看'
 $stack.Children.Add($tbTitle) | Out-Null
 $stack.Children.Add($tbSub) | Out-Null
@@ -284,19 +289,138 @@ public class Win32Focus {
   } catch { }
 }
 
-# ---------- 交互 ----------
-$script:pressPoint = $null
-$img.Add_MouseLeftButtonDown({
-    $script:pressPoint = [System.Windows.Forms.Cursor]::Position
-    try { $win.DragMove() } catch { }
-    $now = [System.Windows.Forms.Cursor]::Position
-    $dx = [math]::Abs($now.X - $script:pressPoint.X)
-    $dy = [math]::Abs($now.Y - $script:pressPoint.Y)
-    if ($dx -lt 5 -and $dy -lt 5) {
-      $script:PatUntil = [DateTime]::Now.AddMilliseconds(900)
-      Squash
+# ---------- 说话框 ----------
+Add-Type -AssemblyName System.Net.Http | Out-Null
+$script:http = New-Object System.Net.Http.HttpClient
+$script:http.Timeout = [TimeSpan]::FromSeconds(60)
+$script:chatTask = $null
+
+$chatWin = New-Object System.Windows.Window
+$chatWin.WindowStyle = [System.Windows.WindowStyle]::None
+$chatWin.AllowsTransparency = $true
+$chatWin.Background = [System.Windows.Media.Brushes]::Transparent
+$chatWin.Topmost = $true
+$chatWin.ShowInTaskbar = $false
+$chatWin.ResizeMode = [System.Windows.ResizeMode]::NoResize
+$chatWin.Width = 300
+$chatWin.Height = 92
+$chatWin.Visibility = [System.Windows.Visibility]::Collapsed
+
+$chatBorder = New-Object System.Windows.Controls.Border
+$chatBorder.CornerRadius = New-Object System.Windows.CornerRadius 14
+$chatBorder.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(252, 255, 255, 255))
+$chatBorder.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(34, 14, 23, 41))
+$chatBorder.BorderThickness = New-Object System.Windows.Thickness 1
+$chatBorder.Padding = New-Object System.Windows.Thickness 12, 10, 12, 10
+$chatBorder.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 18; ShadowDepth = 2; Direction = 270; Opacity = 0.18; Color = [System.Windows.Media.Color]::FromRgb(14, 23, 41) }
+
+$chatHint = New-Object System.Windows.Controls.TextBlock
+$chatHint.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$chatHint.FontSize = 10.5
+$chatHint.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(150, 162, 184))
+$chatHint.Text = '跟我说点什么，回车发送'
+$chatHint.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
+
+$chatBox = New-Object System.Windows.Controls.TextBox
+$chatBox.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$chatBox.FontSize = 13
+$chatBox.BorderThickness = New-Object System.Windows.Thickness 0
+$chatBox.Background = [System.Windows.Media.Brushes]::Transparent
+$chatBox.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(27, 42, 74))
+$chatBox.CaretBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
+$chatBox.AcceptsReturn = $false
+
+$chatStack = New-Object System.Windows.Controls.StackPanel
+$chatStack.Children.Add($chatHint) | Out-Null
+$chatStack.Children.Add($chatBox) | Out-Null
+$chatBorder.Child = $chatStack
+$chatWin.Content = $chatBorder
+
+function Open-Chat {
+  try {
+    $left = $win.Left - $chatWin.Width + $win.Width
+    if ($left -lt 8) { $left = 8 }
+    if ($left + $chatWin.Width -gt ([System.Windows.SystemParameters]::WorkArea.Right - 8)) {
+      $left = [System.Windows.SystemParameters]::WorkArea.Right - $chatWin.Width - 8
     }
-    Save-Pos
+    $top = $win.Top - $chatWin.Height + 30
+    if ($top -lt 8) { $top = $win.Top + $win.Height - 40 }
+    $chatWin.Left = $left
+    $chatWin.Top = $top
+    $chatWin.Visibility = [System.Windows.Visibility]::Visible
+    $chatBox.Text = ''
+    $chatBox.Focus() | Out-Null
+  } catch { }
+}
+
+function Close-Chat { $chatWin.Visibility = [System.Windows.Visibility]::Collapsed }
+
+function Send-Chat {
+  $text = ($chatBox.Text).Trim()
+  Close-Chat
+  if (-not $text) { return }
+  if (-not $script:Base) { Show-Toast '还没连上' 'DSH 那边没回应，等会儿再说' 4; return }
+  $url = "$($script:Base)/ivan-pet/chat?text=" + [Uri]::EscapeDataString($text)
+  Show-Toast '……' '' 60
+  try { $script:chatTask = $script:http.GetStringAsync($url) } catch { Show-Toast '说不出来' '请求没发出去' 4; $script:chatTask = $null }
+}
+
+$chatBox.Add_KeyDown({
+    param($sender, $e)
+    if ($e.Key -eq [System.Windows.Input.Key]::Enter) { Send-Chat; $e.Handled = $true }
+    elseif ($e.Key -eq [System.Windows.Input.Key]::Escape) { Close-Chat; $e.Handled = $true }
+  })
+
+# ---------- 交互 ----------
+$script:dragging = $false
+$script:dragMoved = $false
+$script:dragStartX = 0.0
+$script:dragStartY = 0.0
+$script:dragOriginLeft = 0.0
+$script:dragOriginTop = 0.0
+
+$img.Add_MouseLeftButtonDown({
+    try {
+      $script:dragging = $true
+      $script:dragMoved = $false
+      $c = [System.Windows.Forms.Cursor]::Position
+      $script:dragStartX = $c.X
+      $script:dragStartY = $c.Y
+      $script:dragOriginLeft = $win.Left
+      $script:dragOriginTop = $win.Top
+      [void]$img.CaptureMouse()
+    } catch { }
+  })
+
+$img.Add_MouseMove({
+    if (-not $script:dragging) { return }
+    try {
+      $c = [System.Windows.Forms.Cursor]::Position
+      $dx = $c.X - $script:dragStartX
+      $dy = $c.Y - $script:dragStartY
+      if ((!$script:dragMoved) -and ([math]::Abs($dx) -gt 3 -or [math]::Abs($dy) -gt 3)) {
+        $script:dragMoved = $true
+        Close-Chat
+      }
+      if ($script:dragMoved) {
+        $win.Left = $script:dragOriginLeft + $dx
+        $win.Top = $script:dragOriginTop + $dy
+      }
+    } catch { }
+  })
+
+$img.Add_MouseLeftButtonUp({
+    try {
+      $script:dragging = $false
+      [void]$img.ReleaseMouseCapture()
+      if ($script:dragMoved) {
+        Save-Pos
+      } else {
+        $script:PatUntil = [DateTime]::Now.AddMilliseconds(900)
+        Squash
+        Open-Chat
+      }
+    } catch { }
   })
 
 $win.Add_MouseRightButtonUp({ Focus-Dsh })
@@ -357,10 +481,28 @@ $ui.Add_Tick({
       $toast.Hide()
       $script:ToastUntil = [DateTime]::MinValue
     }
+
+    # 说话：等模型回话
+    if ($script:chatTask -ne $null -and $script:chatTask.IsCompleted) {
+      $task = $script:chatTask
+      $script:chatTask = $null
+      try {
+        $raw = $task.Result
+        $obj = $raw | ConvertFrom-Json
+        if ($obj.ok) {
+          Show-Toast ([string]$obj.reply) '' 20
+        } else {
+          Show-Toast '说不出来' ([string]$obj.error) 5
+        }
+      } catch {
+        Show-Toast '说不出来' '线路不通，等会儿再试' 5
+      }
+    }
   })
 
 $win.Add_Closed({
     $poll.Stop(); $ui.Stop()
+    try { $chatWin.Close() } catch { }
     [System.Windows.Application]::Current.Shutdown()
   })
 
