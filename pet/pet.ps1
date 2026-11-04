@@ -200,14 +200,17 @@ function Set-Frame([string]$name) {
 }
 
 # ---------- 动画 ----------
-$breathe = New-Object System.Windows.Media.Animation.DoubleAnimation
-$breathe.From = 0
-$breathe.To = -4
-$breathe.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(2.6))
-$breathe.AutoReverse = $true
-$breathe.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-$breathe.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
-$move.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $breathe)
+function Start-Breathe {
+  $breathe = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $breathe.From = 0
+  $breathe.To = -4
+  $breathe.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(2.6))
+  $breathe.AutoReverse = $true
+  $breathe.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $breathe.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $move.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $breathe)
+}
+Start-Breathe
 
 function Hop {
   $y = New-Object System.Windows.Media.Animation.DoubleAnimation
@@ -430,6 +433,19 @@ $chatBox.Add_KeyDown({
   })
 
 # ---------- 交互 ----------
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class PetWin {
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  public struct RECT { public int Left, Top, Right, Bottom; }
+}
+'@
+$script:petHwnd = [IntPtr]::Zero
+$script:SWP_NOSIZE = 0x0001
+$script:SWP_NOZORDER = 0x0004
+$script:SWP_NOACTIVATE = 0x0010
 $script:dragging = $false
 $script:dragMoved = $false
 $script:dragStartX = 0.0
@@ -437,28 +453,50 @@ $script:dragStartY = 0.0
 $script:dragOriginLeft = 0.0
 $script:dragOriginTop = 0.0
 $script:dpi = 1.0
+$script:dragWinX = 0
+$script:dragWinY = 0
 
 # 用 15ms 计时器读光标位置来移动窗口：比在每个 MouseMove 里改 Left/Top 跟手得多
-$script:dragTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:dragTimer.Interval = [TimeSpan]::FromMilliseconds(15)
-$script:dragTimer.Add_Tick({
-    if (-not $script:dragging) { return }
-    try {
-      $c = [System.Windows.Forms.Cursor]::Position
-      $dx = ($c.X - $script:dragStartX) / $script:dpi
-      $dy = ($c.Y - $script:dragStartY) / $script:dpi
-      if (-not $script:dragMoved) {
-        if ([math]::Abs($dx) -gt 2 -or [math]::Abs($dy) -gt 2) {
-          $script:dragMoved = $true
-          Close-Chat
-        }
+Add-Type @'
+using System;
+using System.Threading;
+using System.Runtime.InteropServices;
+public class PetDrag {
+  [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+  struct POINT { public int X, Y; }
+  static Thread t;
+  static volatile bool running;
+  public static volatile bool Moved;
+  static int sx, sy, wx, wy;
+  static IntPtr hw;
+  public static void Start(IntPtr hwnd, int cx, int cy, int winx, int winy) {
+    Stop();
+    hw = hwnd; sx = cx; sy = cy; wx = winx; wy = winy; Moved = false;
+    running = true;
+    t = new Thread(Loop);
+    t.IsBackground = true;
+    t.Priority = ThreadPriority.Highest;
+    t.Start();
+  }
+  static void Loop() {
+    while (running) {
+      POINT p;
+      if (GetCursorPos(out p)) {
+        int dx = p.X - sx, dy = p.Y - sy;
+        if (!Moved && (Math.Abs(dx) > 2 || Math.Abs(dy) > 2)) Moved = true;
+        if (Moved) SetWindowPos(hw, IntPtr.Zero, wx + dx, wy + dy, 0, 0, 0x0001 | 0x0004 | 0x0010);
       }
-      if ($script:dragMoved) {
-        $win.Left = $script:dragOriginLeft + $dx
-        $win.Top = $script:dragOriginTop + $dy
-      }
-    } catch { }
-  })
+      Thread.Sleep(8);
+    }
+  }
+  public static void Stop() {
+    running = false;
+    if (t != null) { try { t.Join(60); } catch { } t = null; }
+  }
+}
+'@
+# 窗口移动由 [PetDrag] 的独立线程负责（8ms 一轮，不经过 PowerShell）
 
 $img.Add_MouseLeftButtonDown({
     try {
@@ -474,18 +512,44 @@ $img.Add_MouseLeftButtonDown({
         if ($src -and $src.CompositionTarget) { $script:dpi = $src.CompositionTarget.TransformToDevice.M11 }
       } catch { }
       if ($script:dpi -le 0) { $script:dpi = 1.0 }
+      # 拖的时候别再让呼吸动画占渲染，窗口移动改用 SetWindowPos
+      try { $move.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null) } catch { }
+      try {
+        $script:petHwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
+        $rc = New-Object PetWin+RECT
+        if ([PetWin]::GetWindowRect($script:petHwnd, [ref]$rc)) {
+          $script:dragWinX = $rc.Left
+          $script:dragWinY = $rc.Top
+        } else {
+          $script:dragWinX = [int]($win.Left * $script:dpi)
+          $script:dragWinY = [int]($win.Top * $script:dpi)
+        }
+      } catch { }
       [void]$img.CaptureMouse()
-      $script:dragTimer.Start()
+      if ($script:petHwnd -ne [IntPtr]::Zero) {
+        [PetDrag]::Start($script:petHwnd, $script:dragStartX, $script:dragStartY, $script:dragWinX, $script:dragWinY)
+      }
     } catch { }
   })
 
-# 移动窗口的工作交给 $script:dragTimer（见上），这里不再逐帧改 Left/Top
+# 移动窗口的工作交给 [PetDrag] 的独立线程，这里不再逐帧改 Left/Top
 
 $img.Add_MouseLeftButtonUp({
     try {
       $script:dragging = $false
-      $script:dragTimer.Stop()
+      try { $script:dragMoved = [PetDrag]::Moved } catch { }
+      try { [PetDrag]::Stop() } catch { }
       [void]$img.ReleaseMouseCapture()
+      if ($script:petHwnd -ne [IntPtr]::Zero) {
+        try {
+          $rc = New-Object PetWin+RECT
+          if ([PetWin]::GetWindowRect($script:petHwnd, [ref]$rc)) {
+            $win.Left = $rc.Left / $script:dpi
+            $win.Top = $rc.Top / $script:dpi
+          }
+        } catch { }
+      }
+      try { Start-Breathe } catch { }
       if ($script:dragMoved) {
         Save-Pos
       } else {
