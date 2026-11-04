@@ -1,0 +1,38 @@
+{
+  "name": "dsh-ivan-pet-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ivan 桌宠（桌面常驻版）：独立透明置顶窗口，DSH 最小化也在；跟随会话状态换动作，任务完成弹提示",
+  "type": "module",
+  "main": "./index.js",
+  "license": "MIT",
+  "author": "鲍柳涛",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "desktop-pet",
+    "wpf",
+    "powershell"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./pet/pet.ps1": "./pet/pet.ps1",
+    "./pet/assets/*.png": "./pet/assets/*.png"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "pet",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0"
+  }
+}

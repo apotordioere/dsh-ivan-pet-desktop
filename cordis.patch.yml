@@ -1,0 +1,5 @@
+# Ivan 桌宠（桌面常驻版）：宿主侧只做一件事——把 WPF 窗口拉起来，关掉插件就把进程收掉。
+# 窗口本身是 PowerShell + WPF 写的独立透明置顶窗口，不依赖 DSH 页面，所以 DSH 最小化也在。
+- insert:
+    - id: ivan-pet-desktop
+      name: dsh-ivan-pet-desktop
