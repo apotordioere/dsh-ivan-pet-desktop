@@ -464,6 +464,7 @@ using System.Runtime.InteropServices;
 public class PetDrag {
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
   struct POINT { public int X, Y; }
   static Thread t;
   static volatile bool running;
@@ -481,6 +482,8 @@ public class PetDrag {
   }
   static void Loop() {
     while (running) {
+      // 左键松开就自己收工：MouseUp 事件丢了也不会一直粘着光标
+      if ((GetAsyncKeyState(0x01) & 0x8000) == 0) { running = false; break; }
       POINT p;
       if (GetCursorPos(out p)) {
         int dx = p.X - sx, dy = p.Y - sy;
@@ -490,6 +493,7 @@ public class PetDrag {
       Thread.Sleep(8);
     }
   }
+  public static bool IsRunning { get { return running; } }
   public static void Stop() {
     running = false;
     if (t != null) { try { t.Join(60); } catch { } t = null; }
@@ -553,9 +557,10 @@ $img.Add_MouseLeftButtonUp({
       if ($script:dragMoved) {
         Save-Pos
       } else {
-        $script:PatUntil = [DateTime]::Now.AddMilliseconds(900)
+        # 单击：只把位置定住（存盘），不弹对话框；双击同理
+        $script:PatUntil = [DateTime]::Now.AddMilliseconds(600)
         Squash
-        Open-Chat
+        Save-Pos
       }
     } catch { }
   })
@@ -585,6 +590,28 @@ $poll.Add_Tick({
 $ui = New-Object System.Windows.Threading.DispatcherTimer
 $ui.Interval = [TimeSpan]::FromMilliseconds(120)
 $ui.Add_Tick({
+    # 兜底：拖动线程已自行结束（左键松开）但 MouseUp 没进来 → 在这里收尾定住
+    if ($script:dragging) {
+      $alive = $true
+      try { $alive = [PetDrag]::IsRunning } catch { }
+      if (-not $alive) {
+        $script:dragging = $false
+        try { [PetDrag]::Stop() } catch { }
+        if ($script:petHwnd -ne [IntPtr]::Zero) {
+          try {
+            $rc2 = New-Object PetWin+RECT
+            if ([PetWin]::GetWindowRect($script:petHwnd, [ref]$rc2)) {
+              $win.Left = $rc2.Left / $script:dpi
+              $win.Top = $rc2.Top / $script:dpi
+            }
+          } catch { }
+        }
+        try { Start-Breathe } catch { }
+        try { Save-Pos } catch { }
+        Write-Log "drag finished (auto)"
+      }
+    }
+
     $st = $script:LatestState
 
     if ($st -ne $script:LastState) {
