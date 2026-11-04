@@ -244,21 +244,26 @@ $toast.Background = [System.Windows.Media.Brushes]::Transparent
 $toast.Topmost = $true
 $toast.ShowInTaskbar = $false
 $toast.ResizeMode = [System.Windows.ResizeMode]::NoResize
-$toast.Width = 300
-$toast.Height = 96
+$toast.SizeToContent = [System.Windows.SizeToContent]::WidthAndHeight
+$toast.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+
+# 说话气泡：白底圆角 + 下面一个小尖角，尖角指着桌宠
+$bubbleRoot = New-Object System.Windows.Controls.StackPanel
+$bubbleRoot.Orientation = [System.Windows.Controls.Orientation]::Vertical
+$bubbleRoot.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
 
 $border = New-Object System.Windows.Controls.Border
-$border.CornerRadius = New-Object System.Windows.CornerRadius(14)
-$border.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(250, 255, 255, 255))
-$border.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(34, 14, 23, 41))
+$border.CornerRadius = New-Object System.Windows.CornerRadius(16)
+$border.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(252, 255, 255, 255))
+$border.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(40, 14, 23, 41))
 $border.BorderThickness = New-Object System.Windows.Thickness(1)
-$border.Padding = New-Object System.Windows.Thickness(14, 12, 14, 12)
+$border.Padding = New-Object System.Windows.Thickness(15, 11, 15, 11)
 try {
   $shadow = New-Object System.Windows.Media.Effects.DropShadowEffect
-  $shadow.BlurRadius = 20
-  $shadow.ShadowDepth = 2
+  $shadow.BlurRadius = 18
+  $shadow.ShadowDepth = 3
   $shadow.Direction = 270
-  $shadow.Opacity = 0.20
+  $shadow.Opacity = 0.16
   $shadow.Color = [System.Windows.Media.Color]::FromRgb(14, 23, 41)
   $border.Effect = $shadow
 } catch { }
@@ -272,31 +277,77 @@ $tbTitle.FontWeight = [System.Windows.FontWeights]::SemiBold
 $tbTitle.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(27, 42, 74))
 $tbTitle.Text = '任务好了'
 $tbTitle.TextWrapping = [System.Windows.TextWrapping]::Wrap
-$tbTitle.MaxWidth = 288
+$tbTitle.MaxWidth = 248
 $tbTitle.LineHeight = 19
 $tbSub = New-Object System.Windows.Controls.TextBlock
 $tbSub.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
-$tbSub.FontSize = 11
+$tbSub.FontSize = 11.5
 $tbSub.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(107, 122, 147))
 $tbSub.Margin = New-Object System.Windows.Thickness(0, 4, 0, 0)
 $tbSub.TextWrapping = [System.Windows.TextWrapping]::Wrap
-$tbSub.MaxWidth = 288
+$tbSub.MaxWidth = 248
 $tbSub.Text = '点这里回去看看'
 $stack.Children.Add($tbTitle) | Out-Null
 $stack.Children.Add($tbSub) | Out-Null
 $border.Child = $stack
-$toast.Content = $border
+$bubbleRoot.Children.Add($border) | Out-Null
+
+$tailCanvas = New-Object System.Windows.Controls.Canvas
+$tailCanvas.Width = 18
+$tailCanvas.Height = 9
+$tail = New-Object System.Windows.Shapes.Polygon
+$ptTail = New-Object System.Windows.Media.PointCollection
+$ptTail.Add((New-Object System.Windows.Point(0, 0))) | Out-Null
+$ptTail.Add((New-Object System.Windows.Point(18, 0))) | Out-Null
+$ptTail.Add((New-Object System.Windows.Point(9, 9))) | Out-Null
+$tail.Points = $ptTail
+$tail.Fill = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(252, 255, 255, 255))
+$tail.Stroke = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(40, 14, 23, 41))
+$tail.StrokeThickness = 1
+$tailCanvas.Children.Add($tail) | Out-Null
+$bubbleRoot.Children.Add($tailCanvas) | Out-Null
+$toast.Content = $bubbleRoot
 
 function Show-Toast([string]$title, [string]$sub, [int]$seconds = 6) {
   $tbTitle.Text = $title
-  $tbSub.Text = $sub
-  # 贴在桌宠左侧，别挡住人
-  $left = $win.Left - $toast.Width - 14
-  if ($left -lt 10) { $left = $win.Left + $win.Width + 14 }
-  $toast.Left = $left
-  $toast.Top = $win.Top + 26
+  if ([string]::IsNullOrWhiteSpace($sub)) {
+    $tbSub.Visibility = [System.Windows.Visibility]::Collapsed
+  } else {
+    $tbSub.Text = $sub
+    $tbSub.Visibility = [System.Windows.Visibility]::Visible
+  }
   if (-not $toast.IsVisible) { $toast.Show() }
+  $toast.UpdateLayout()
+  $tw = $toast.ActualWidth
+  if ($tw -le 0) { $tw = 260 }
+  $th = $toast.ActualHeight
+  if ($th -le 0) { $th = 64 }
+  # 气泡贴在脑袋上方、水平居中；顶到屏幕上沿就翻到脚下
+  $left = $win.Left + ($win.Width - $tw) / 2
+  $top = $win.Top - $th + 6
+  if ($top -lt 4) { $top = $win.Top + $win.Height - 10 }
+  if ($left -lt 4) { $left = 4 }
+  $toast.Left = $left
+  $toast.Top = $top
   $script:ToastUntil = [DateTime]::Now.AddSeconds($seconds)
+}
+
+$script:doneLines = @(
+  '这一轮做完了。',
+  '好了，收工。',
+  '做完了。你回来看一眼。',
+  '完事。别让我等太久。'
+)
+$script:errLines = @(
+  '出了点岔子。',
+  '卡住了，你来看一下。',
+  '这一步没过去。'
+)
+function Show-Bubble-TaskDone {
+  Show-Toast ($script:doneLines | Get-Random) '' 7
+}
+function Show-Bubble-TaskError {
+  Show-Toast ($script:errLines | Get-Random) '' 8
 }
 
 function Focus-Dsh {
@@ -619,11 +670,11 @@ $ui.Add_Tick({
       $script:LastState = $st
       Write-Log "state $prev -> $st"
       if ($st -eq 'done') {
-        Show-Toast '任务好了' '点这里回去看看'
+        Show-Bubble-TaskDone
         [System.Media.SystemSounds]::Asterisk.Play()
         Hop
       } elseif ($st -eq 'error') {
-        Show-Toast '出错了' '点这里回去看看'
+        Show-Bubble-TaskError
         [System.Media.SystemSounds]::Hand.Play()
       } elseif ($st -eq 'pat') {
         Squash
@@ -738,7 +789,7 @@ Write-Log 'window shown'
 $poll.Start()
 $ui.Start()
 
-if ($DemoToast) { Show-Toast '任务好了' '点这里回去看看' }
+if ($DemoToast) { Show-Bubble-TaskDone }
 
 $app = New-Object System.Windows.Application
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
