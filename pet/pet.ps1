@@ -28,6 +28,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 $script:Assets = $Assets
 $script:BaseFile = Join-Path $env:APPDATA 'ivan-pet-desktop\base.txt'
 $script:Base = $null
+$script:PollFails = 0
 if ($Base) { $script:Base = $Base.TrimEnd('/') }
 $script:LastState = 'idle'
 $script:PatUntil = [DateTime]::MinValue
@@ -643,9 +644,17 @@ $poll.Add_Tick({
     }
     try {
       $r = Invoke-RestMethod -Uri "$($script:Base)/ivan-pet/state" -TimeoutSec 1
-      if ($r -and $r.state) { $script:LatestState = [string]$r.state }
+      if ($r -and $r.state) {
+        $script:LatestState = [string]$r.state
+        $script:PollFails = 0
+      }
     } catch {
-      $script:Base = $null
+      # 单次超时（宿主正忙）就把 base 清掉会漏掉 done 那一帧，所以连续失败才重连
+      $script:PollFails = $script:PollFails + 1
+      if ($script:PollFails -ge 4) {
+        $script:PollFails = 0
+        $script:Base = $null
+      }
     }
   })
 
