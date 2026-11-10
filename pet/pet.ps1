@@ -2,6 +2,7 @@
   [string]$Assets = (Join-Path $PSScriptRoot 'assets'),
   [int]$Width = 150,
   [int]$Height = 282,
+  [string]$Base = '',
   [switch]$DemoToast
 )
 
@@ -25,7 +26,9 @@ public class PetDpi {
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
 $script:Assets = $Assets
+$script:BaseFile = Join-Path $env:APPDATA 'ivan-pet-desktop\base.txt'
 $script:Base = $null
+if ($Base) { $script:Base = $Base.TrimEnd('/') }
 $script:LastState = 'idle'
 $script:PatUntil = [DateTime]::MinValue
 $script:BlinkUntil = [DateTime]::MinValue
@@ -625,8 +628,17 @@ $poll = New-Object System.Windows.Threading.DispatcherTimer
 $poll.Interval = [TimeSpan]::FromMilliseconds(900)
 $poll.Add_Tick({
     if (-not $script:Base) {
-      $script:Base = Find-Base
-      if (-not $script:Base) { return }
+      # 宿主启动时会把 origin 写进 base.txt（端口每次重启都可能变，靠进程名找端口不可靠）
+      $cand = $null
+      try {
+        if (Test-Path $script:BaseFile) {
+          $cand = (Get-Content $script:BaseFile -Raw -ErrorAction SilentlyContinue)
+          if ($cand) { $cand = $cand.Trim() }
+        }
+      } catch { }
+      if (-not $cand) { $cand = Find-Base }
+      if (-not $cand) { return }
+      $script:Base = $cand.TrimEnd('/')
       Write-Log "base=$($script:Base)"
     }
     try {

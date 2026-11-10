@@ -26,6 +26,10 @@ const SCRIPT = join(HERE, 'pet', 'pet.ps1')
 const DEFAULT_ASSETS = join(HERE, 'pet', 'assets')
 const STATE_DIR = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'ivan-pet-desktop')
 const PID_FILE = join(STATE_DIR, 'pet.pid')
+const BASE_FILE = join(STATE_DIR, 'base.txt')
+
+const PRIORITY = { idle: 0, pat: 1, speaking: 2, thinking: 3, coding: 4, done: 5, error: 6 }
+const TTL = { pat: 1200, done: 2600, error: 5000 }
 
 function alive(pid) {
   if (!pid || pid <= 0) return false
@@ -86,6 +90,23 @@ export function apply(ctx, config = {}) {
     }
 
     // 2. 拉起窗口
+    // 端口每次宿主重启都可能变，窗口靠进程名找端口并不可靠（实测找不到：HTTP 服务不在
+    // "DeepSeek Harness" 进程名下），所以这里把 webServer 自己报的 origin 直接交给它。
+    let origin = ''
+    try {
+      origin = ctx.get('webServer')?.getOrigin?.() ?? ''
+    } catch {
+      /* 没 listen 完就没有 origin，窗口会退回自己找 */
+    }
+    if (origin) {
+      try {
+        mkdirSync(STATE_DIR, { recursive: true })
+        writeFileSync(BASE_FILE, origin, 'utf8')
+      } catch {
+        /* 写不进也能靠 -Base 参数 */
+      }
+    }
+
     const args = [
       '-NoProfile',
       '-STA',
@@ -93,6 +114,7 @@ export function apply(ctx, config = {}) {
       '-WindowStyle', 'Hidden',
       '-File', SCRIPT,
       '-Assets', assets,
+      ...(origin ? ['-Base', origin] : []),
       ...extra,
     ]
     const child = spawn('powershell.exe', args, {
@@ -124,9 +146,123 @@ export function apply(ctx, config = {}) {
       } catch {
         /* ignore */
       }
+      try {
+        unlinkSync(BASE_FILE)
+      } catch {
+        /* ignore */
+      }
       log('桌宠窗口已关闭')
     }
   }, 'ivan-pet-desktop: 拉起桌面窗口')
+
+  // ---- 状态：窗口用 GET /ivan-pet/state 轮询，靠它换动作 ----
+  // 原来这几条路由在另一个 ivan-pet 插件里；并进来以后只留这一个宠物插件。
+  const STATE_ROUTE = '/ivan-pet/state'
+  let current = { state: 'idle', since: Date.now() }
+  let decayTimer = null
+  let decayTo = 'idle'
+
+  const clearDecay = () => {
+    if (decayTimer !== null) {
+      clearTimeout(decayTimer)
+      decayTimer = null
+    }
+  }
+
+  /** 切状态：只在优先级更高、或显式强制时生效，免得"刚干完"盖掉"报错了" */
+  const set = (state, { sessionId, force = false, ttlMs, fallbackTo = 'idle' } = {}) => {
+    const same = current.state === state
+    if (!force && !same && PRIORITY[state] < PRIORITY[current.state] && decayTimer !== null) return
+    if (!same || current.sessionId !== sessionId) {
+      current = { state, since: Date.now(), sessionId }
+    }
+    clearDecay()
+    const ttl = ttlMs ?? TTL[state]
+    if (ttl) {
+      decayTo = fallbackTo
+      decayTimer = setTimeout(() => {
+        decayTimer = null
+        current = { state: decayTo, since: Date.now() }
+      }, ttl)
+    }
+  }
+
+  ctx.effect(() => {
+    const offs = []
+
+    offs.push(
+      ctx.on('agent/status', (payload) => {
+        const status = payload?.status
+        const sessionId = payload?.agent?.sessionId ?? payload?.agent?.id
+        if (status === 'running') {
+          set('thinking', { sessionId })
+        } else if (status === 'idle') {
+          const wasBusy = PRIORITY[current.state] >= PRIORITY.coding
+          if (wasBusy) set('done', { sessionId, force: true })
+          else set('idle', { sessionId, force: true })
+        }
+      }),
+    )
+
+    offs.push(
+      ctx.on('agent/assistant-stream', (payload) => {
+        set('speaking', { sessionId: payload?.agent?.sessionId ?? payload?.agent?.id })
+      }),
+    )
+
+    offs.push(ctx.on('tools/result', () => set('coding', {})))
+
+    offs.push(
+      ctx.on('agent/error', (payload) => {
+        set('error', {
+          sessionId: payload?.agent?.sessionId ?? payload?.agent?.id,
+          force: true,
+          fallbackTo: 'idle',
+        })
+      }),
+    )
+
+    offs.push(
+      ctx.on('api-session/status', (sessionId, running) => {
+        if (!running && current.state === 'idle') return
+        set(running ? 'thinking' : 'idle', { sessionId, force: !running })
+      }),
+    )
+
+    return () => {
+      for (const off of offs) {
+        try {
+          off()
+        } catch {
+          /* 重复解绑 */
+        }
+      }
+      clearDecay()
+    }
+  }, 'ivan-pet-desktop: agent 状态监听')
+
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: STATE_ROUTE,
+        handler: (req, res) => {
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          })
+          res.end(
+            JSON.stringify({
+              state: current.state,
+              since: current.since,
+              sessionId: current.sessionId ?? null,
+              serverNow: Date.now(),
+            }),
+          )
+        },
+      }),
+    'ivan-pet-desktop: 状态接口',
+  )
 
   // ---- 对话：窗户里说的话，交给当前默认模型，用 Ivan 的口气回 ----
   // 用 ctx.get 拿可选服务：宿主没有 llm 时对话不可用，但窗口照常。
