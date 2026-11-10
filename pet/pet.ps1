@@ -3,7 +3,8 @@
   [int]$Width = 150,
   [int]$Height = 282,
   [string]$Base = '',
-  [switch]$DemoToast
+  [switch]$DemoToast,
+  [switch]$DemoChatter
 )
 
 # 桌面常驻版 Ivan：独立置顶透明窗口，DSH 最小化也看得见；轮询宿主状态换动作；任务完成弹提示。
@@ -379,6 +380,62 @@ function Show-Bubble-TaskError {
   Show-Toast ($script:errLines | Get-Random) '' 8
 }
 
+# ---------- 人设联动：从 whale-persona 配置里读称呼 ----------
+$script:PersonaFile = Join-Path $env:USERPROFILE '.dsh\whale-persona\config.json'
+$script:PersonaStamp = ''
+$script:UserName = '哥'
+$script:SelfName = '我'
+function Update-PersonaNames {
+  try {
+    $st = Get-Item $script:PersonaFile -ErrorAction Stop
+    $key = "$($st.LastWriteTimeUtc.Ticks)/$($st.Length)"
+    if ($key -ne $script:PersonaStamp) {
+      $cfg = [IO.File]::ReadAllText($script:PersonaFile, [Text.Encoding]::UTF8) | ConvertFrom-Json
+      if ($cfg.persona.userName) { $script:UserName = [string]$cfg.persona.userName }
+      if ($cfg.persona.selfNameFlash) { $script:SelfName = [string]$cfg.persona.selfNameFlash }
+      $script:PersonaStamp = $key
+    }
+  } catch { }
+}
+
+# ---------- 碎碎念 ----------
+$script:chatterLines = @(
+  '{u}，水喝了没有。',
+  '屏幕这么亮，眼睛不酸吗。',
+  '别老坐着。',
+  '尾巴压麻了。',
+  '窗外那只鸟又来了，站半天了。',
+  '你这键盘声，比你说话还密。',
+  '……有事就叫我。',
+  '刚才那步其实还能再快点。',
+  '我在这儿。',
+  '别熬太晚。',
+  '这块屏看久了会花。',
+  '杯子快碰着我了。',
+  '今天还剩多少事，你心里有数吧。',
+  '冷气开太低了。',
+  '腰挺直。',
+  '我不困，是你在打哈欠。'
+)
+$script:chatBroke = @(
+  '余额见底了{u}，别乱花。',
+  '再这么下去要停机了。',
+  '钱不够了，你看着办。'
+)
+$script:ChatterOn = $true
+$script:ChatterBroke = $false
+$script:NextChatter = [DateTime]::Now.AddSeconds(45 + (Get-Random -Minimum 0 -Maximum 60))
+
+function Show-Chatter {
+  Update-PersonaNames
+  $pool = $script:chatterLines
+  if ($script:ChatterBroke) { $pool = $script:chatBroke }
+  $line = ($pool | Get-Random)
+  $line = $line.Replace('{u}', $script:UserName)
+  Show-Toast $line '' 5
+  Write-Log "chatter: $line"
+}
+
 function Focus-Dsh {
   try {
     $p = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'DeepSeek' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
@@ -658,6 +715,22 @@ $bal = New-Object System.Windows.Threading.DispatcherTimer
 $bal.Interval = [TimeSpan]::FromSeconds(60)
 $bal.Add_Tick({ try { Update-Balance $false } catch { } })
 
+# ---------- 碎碎念定时器：闲着的时候隔一会儿嘟囔一句 ----------
+$chatter = New-Object System.Windows.Threading.DispatcherTimer
+$chatter.Interval = [TimeSpan]::FromSeconds(20)
+$chatter.Add_Tick({
+    try {
+      if (-not $script:ChatterOn) { return }
+      if ([DateTime]::Now -lt $script:NextChatter) { return }
+      if ($toast.IsVisible) { $script:NextChatter = [DateTime]::Now.AddSeconds(15); return }
+      $st2 = $script:LatestState
+      if ($st2 -ne 'idle' -and $st2 -ne 'speaking') { $script:NextChatter = [DateTime]::Now.AddSeconds(20); return }
+      if ($win.Visibility -ne [System.Windows.Visibility]::Visible) { $script:NextChatter = [DateTime]::Now.AddSeconds(60); return }
+      Show-Chatter
+      $script:NextChatter = [DateTime]::Now.AddSeconds(75 + (Get-Random -Minimum 0 -Maximum 120))
+    } catch { }
+  })
+
 # ---------- 画面刷新 ----------
 $ui = New-Object System.Windows.Threading.DispatcherTimer
 $ui.Interval = [TimeSpan]::FromMilliseconds(120)
@@ -769,6 +842,14 @@ $miOutfit.DropDownItems.Add($miOutfitPajama) | Out-Null
 $miOutfit.DropDownItems.Add($miOutfitWinter) | Out-Null
 $trayMenu.Items.Add($miOutfit) | Out-Null
 
+$miSay = New-Object System.Windows.Forms.ToolStripMenuItem
+$miSay.Text = '让他说句话'
+$trayMenu.Items.Add($miSay) | Out-Null
+
+$miChatter = New-Object System.Windows.Forms.ToolStripMenuItem
+$miChatter.Text = '碎碎念：开'
+$trayMenu.Items.Add($miChatter) | Out-Null
+
 $miDsh = New-Object System.Windows.Forms.ToolStripMenuItem
 $miDsh.Text = '回 DSH 看看'
 $trayMenu.Items.Add($miDsh) | Out-Null
@@ -799,6 +880,14 @@ function Sync-OutfitMenu {
 $miOutfitDefault.Add_Click({ try { Set-Outfit 'default'; Sync-OutfitMenu } catch { } })
 $miOutfitPajama.Add_Click({ try { Set-Outfit 'pajama'; Sync-OutfitMenu } catch { } })
 $miOutfitWinter.Add_Click({ try { Set-Outfit 'winter'; Sync-OutfitMenu } catch { } })
+$miSay.Add_Click({ try { Show-Chatter } catch { } })
+$miChatter.Add_Click({
+    try {
+      $script:ChatterOn = -not $script:ChatterOn
+      if ($script:ChatterOn) { $miChatter.Text = '碎碎念：开'; $script:NextChatter = [DateTime]::Now.AddSeconds(20) }
+      else { $miChatter.Text = '碎碎念：关' }
+    } catch { }
+  })
 $miDsh.Add_Click({ Focus-Dsh })
 $miToggle.Add_Click({
     try {
@@ -842,6 +931,7 @@ $ui.Start()
 $bal.Start()
 
 if ($DemoToast) { Show-Bubble-TaskDone }
+if ($DemoChatter) { Show-Chatter }
 
 $app = New-Object System.Windows.Application
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown

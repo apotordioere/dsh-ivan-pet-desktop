@@ -36,6 +36,7 @@ plugin_manager install_bundle  target: "link:D:\\path\\to\\dsh-ivan-pet-desktop"
 
 ## 换衣服 / 表情
 
+- **碎碎念**：闲下来的时候他会自己嘟囔一句（挂在头顶的气泡，5 秒消失）。台词十六句，`{u}` 会换成 `~/.dsh/whale-persona/config.json` 里的 `persona.userName`，改完人设下一步生效、不用重启桌宠。平时 75–195 秒一句，只在 idle / speaking 且没有别的话在显示时才说；余额低于阈值时会换成催钱的三句。托盘右键「让他说句话」立刻来一句，「碎碎念：开/关」可以整个关掉
 - **换衣服**：右键托盘图标 →「换衣服」→ 日常（默认）/ 睡衣 / 冬装。当前选择存在 `%APPDATA%\ivan-pet\outfit.json`，下次启动沿用。
   - 每套衣服都是完整的 7 帧（idle / blink / thinking / coding / done / error / pat），放在 `pet/assets/outfits/<套名>/`；
   - 缺某帧时先回落到同套的 `idle`，再回落到默认套，不会出现半套衣服。
