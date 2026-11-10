@@ -211,6 +211,91 @@ function Set-Outfit([string]$name) {
   Write-Log "outfit=$name"
 }
 
+# ---------- 主题：把四张特写设成桌面壁纸 ----------
+$script:ThemeFile = Join-Path $env:APPDATA 'ivan-pet-desktop\theme.json'
+$script:ThemeDir = Join-Path $Assets 'theme'
+$script:ThemeName = ''
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class PetWall {
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool SystemParametersInfo(int action, int param, string value, int winIni);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool SystemParametersInfo(int action, int param, StringBuilder value, int winIni);
+}
+"@ -ErrorAction SilentlyContinue
+
+function Get-CurrentWallpaper {
+  try {
+    $sb = New-Object System.Text.StringBuilder 1024
+    if ([PetWall]::SystemParametersInfo(0x0073, 1024, $sb, 0)) { return $sb.ToString() }
+  } catch { }
+  return ''
+}
+
+function Read-ThemeState {
+  try {
+    if (Test-Path $script:ThemeFile) {
+      return (Get-Content $script:ThemeFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+    }
+  } catch { }
+  return $null
+}
+
+function Save-ThemeState($name, $previous) {
+  try {
+    $obj = @{ name = $name; previous = $previous; at = (Get-Date).ToString('s') }
+    [IO.File]::WriteAllText($script:ThemeFile, ($obj | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+  } catch { }
+}
+
+function Set-Theme([string]$name, [switch]$Quiet) {
+  $img = Join-Path $script:ThemeDir ($name + '.jpg')
+  if (-not (Test-Path $img)) { if (-not $Quiet) { Write-Log "theme missing: $name" }; return $false }
+  $state = Read-ThemeState
+  $prev = ''
+  if ($state -and $state.previous) { $prev = $state.previous } else { $prev = Get-CurrentWallpaper }
+  $ok = $false
+  try { $ok = [PetWall]::SystemParametersInfo(0x0014, 0, $img, 0x01 -bor 0x02) } catch { }
+  if ($ok) {
+    $script:ThemeName = $name
+    Save-ThemeState $name $prev
+    Write-Log "wallpaper -> $name"
+  }
+  return $ok
+}
+
+function Restore-Wallpaper {
+  $state = Read-ThemeState
+  if (-not $state -or -not $state.previous) { Write-Log 'no previous wallpaper'; return }
+  $prev = [string]$state.previous
+  if ($prev -and (Test-Path $prev)) {
+    try { [void][PetWall]::SystemParametersInfo(0x0014, 0, $prev, 0x01 -bor 0x02) } catch { }
+    Write-Log "wallpaper restored"
+  } else {
+    Write-Log "previous wallpaper gone: $prev"
+  }
+  $script:ThemeName = ''
+  Save-ThemeState '' ''
+}
+
+function Sync-ThemeMenu {
+  try {
+    foreach ($k in $script:ThemeItems.Keys) { $script:ThemeItems[$k].Checked = ($script:ThemeName -eq $k) }
+  } catch { }
+}
+
+function Load-Theme {
+  $state = Read-ThemeState
+  if ($state -and $state.name) {
+    $script:ThemeName = [string]$state.name
+    Set-Theme $script:ThemeName -Quiet | Out-Null
+  }
+}
+
 function Load-Outfit {
   try {
     Write-Log "outfit file: $($script:OutfitFile) exists=$(Test-Path $script:OutfitFile)"
@@ -381,19 +466,36 @@ function Show-Bubble-TaskError {
 }
 
 # ---------- 人设联动：从 whale-persona 配置里读称呼 ----------
-$script:PersonaFile = Join-Path $env:USERPROFILE '.dsh\whale-persona\config.json'
+$script:PersonaFile = Join-Path $env:APPDATA 'ivan-pet-desktop\persona.json'
+$script:PersonaFileFallback = Join-Path $env:USERPROFILE '.dsh\whale-persona\config.json'
 $script:PersonaStamp = ''
 $script:UserName = '哥'
 $script:SelfName = '我'
 function Update-PersonaNames {
   try {
-    $st = Get-Item $script:PersonaFile -ErrorAction Stop
-    $key = "$($st.LastWriteTimeUtc.Ticks)/$($st.Length)"
-    if ($key -ne $script:PersonaStamp) {
-      $cfg = [IO.File]::ReadAllText($script:PersonaFile, [Text.Encoding]::UTF8) | ConvertFrom-Json
-      if ($cfg.persona.userName) { $script:UserName = [string]$cfg.persona.userName }
-      if ($cfg.persona.selfNameFlash) { $script:SelfName = [string]$cfg.persona.selfNameFlash }
-      $script:PersonaStamp = $key
+    # 先读新路径
+    if (Test-Path $script:PersonaFile) {
+      $st = Get-Item $script:PersonaFile -ErrorAction Stop
+      $key = "$($st.LastWriteTimeUtc.Ticks)/$($st.Length)"
+      if ($key -ne $script:PersonaStamp) {
+        $cfg = [IO.File]::ReadAllText($script:PersonaFile, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($cfg.userName) { $script:UserName = [string]$cfg.userName }
+        if ($cfg.selfName) { $script:SelfName = [string]$cfg.selfName }
+        $script:PersonaStamp = $key
+      }
+      return
+    }
+    
+    # 回落到旧路径
+    if (Test-Path $script:PersonaFileFallback) {
+      $st = Get-Item $script:PersonaFileFallback -ErrorAction Stop
+      $key = "$($st.LastWriteTimeUtc.Ticks)/$($st.Length)"
+      if ($key -ne $script:PersonaStamp) {
+        $cfg = [IO.File]::ReadAllText($script:PersonaFileFallback, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($cfg.persona.userName) { $script:UserName = [string]$cfg.persona.userName }
+        if ($cfg.persona.selfNameFlash) { $script:SelfName = [string]$cfg.persona.selfNameFlash }
+        $script:PersonaStamp = $key
+      }
     }
   } catch { }
 }
@@ -850,6 +952,29 @@ $miChatter = New-Object System.Windows.Forms.ToolStripMenuItem
 $miChatter.Text = '碎碎念：开'
 $trayMenu.Items.Add($miChatter) | Out-Null
 
+$miTheme = New-Object System.Windows.Forms.ToolStripMenuItem
+$miTheme.Text = '主题'
+$script:ThemeItems = @{}
+foreach ($t in @(
+    @{ name = 'night';  text = '夜（屏幕冷光）' },
+    @{ name = 'window'; text = '窗（下午逆光）' },
+    @{ name = 'water';  text = '水（下沉的蓝）' },
+    @{ name = 'rain';   text = '雨（隔窗）' }
+  )) {
+  $item = New-Object System.Windows.Forms.ToolStripMenuItem
+  $item.Text = $t.text
+  $item.Tag = $t.name
+  $item.Add_Click({ param($sender, $e) try { Set-Theme $sender.Tag; Sync-ThemeMenu } catch { } })
+  $miTheme.DropDownItems.Add($item) | Out-Null
+  $script:ThemeItems[$t.name] = $item
+}
+$miThemeRestore = New-Object System.Windows.Forms.ToolStripMenuItem
+$miThemeRestore.Text = '恢复原壁纸'
+$miThemeRestore.Add_Click({ try { Restore-Wallpaper; Sync-ThemeMenu } catch { } })
+$miTheme.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+$miTheme.DropDownItems.Add($miThemeRestore) | Out-Null
+$trayMenu.Items.Add($miTheme) | Out-Null
+
 $miDsh = New-Object System.Windows.Forms.ToolStripMenuItem
 $miDsh.Text = '回 DSH 看看'
 $trayMenu.Items.Add($miDsh) | Out-Null
@@ -922,6 +1047,8 @@ $win.Add_Closed({
   })
 
 Load-Outfit
+Load-Theme
+Sync-ThemeMenu
 try { Sync-OutfitMenu } catch { }
 Write-Log 'window creating'
 $win.Show()

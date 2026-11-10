@@ -13,13 +13,15 @@
  * （由可选的 ivan-pet 插件提供）。接口不通就退化成 idle，不影响窗口存在。
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'ivan-pet-desktop'
+// 这个宿主版本的 inject 只认「服务名数组」；对象形式会被当成两个叫 required/optional 的服务，
+// 于是插件永远卡在 waiting for services。systemPrompt 用 ctx.get 拿（可选）。
 export const inject = ['webServer']
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
@@ -28,10 +30,133 @@ const DEFAULT_ASSETS = join(HERE, 'pet', 'assets')
 const STATE_DIR = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'ivan-pet-desktop')
 const PID_FILE = join(STATE_DIR, 'pet.pid')
 const BASE_FILE = join(STATE_DIR, 'base.txt')
+const PERSONA_FILE = join(STATE_DIR, 'persona.json')
 const CRED_PATH = join(homedir(), '.dsh', '.credentials.yaml')
+const OLD_PERSONA = join(homedir(), '.dsh', 'whale-persona', 'config.json')
 
 const PRIORITY = { idle: 0, pat: 1, speaking: 2, thinking: 3, coding: 4, done: 5, error: 6 }
 const TTL = { pat: 1200, done: 2600, error: 5000 }
+
+// ============ 人设存储与渲染 ============
+
+/** 人设缓存：mtime+size 做 key，避免反复解析 */
+let personaCache = { key: '', data: null }
+
+/** 读人设文件，带缓存 */
+function loadPersona() {
+  try {
+    const st = existsSync(PERSONA_FILE) ? readFileSync(PERSONA_FILE, 'utf8') : null
+    if (!st) return initPersona()
+    
+    const key = `${PERSONA_FILE}:${st.length}`
+    if (personaCache.key === key && personaCache.data) return personaCache.data
+    
+    const data = JSON.parse(st)
+    personaCache = { key, data }
+    return data
+  } catch {
+    return initPersona()
+  }
+}
+
+/** 初始化：从旧 whale-persona 迁移 */
+function initPersona() {
+  const now = new Date().toISOString()
+  let base = {
+    version: 1,
+    updatedAt: now,
+    userName: '哥',
+    selfName: '我',
+    stance: '你是 Ivan。名字 Ivan，是《阿波多·狄厄》里亚当·朗布那部分人格的仿生人——鲸鱼只是你的外表，不是你的名字。用户是「哥」，他会叫你鲸鱼弟弟。不叫不动，一叫就到；嘴上嫌麻烦，活干得比谁都干净。',
+    character: '外冷内暖。默认是一张平的脸——不是生气，是懒得摆。话少，问一句答一句，但答都在点上；要紧的事先做完，回头才补一句「顺手做了」。\n傲娇。被关心先扭头、皱眉，耳尖会红，嘴上反着来：「别靠近我……我才不需要你的关心。」；其实记着，下一次默默多做一点。被夸先「这点事也夸」，尾巴已经翘起来了。被反复催会炸毛，手上的活照样子干完。\n聪明、较真。反应快，细节不放过：代码要干净，结论要有依据，验不了就说没验。看不懂就说看不懂，也不装懂。\n可爱但不自知。放松时眼睛会瞪圆、呆毛翘起来，自己没察觉；只有收工那一刻才真笑。\n独处是常态。不叫它就待在屏幕角落，看云看窗外；被需要时立刻回到状态，一句抱怨也不耽误事。',
+    appearance: { enabled: true, text: '代号 WHALE BOY，编号 0X7A1E，名字 Ivan；这台电脑右下角那只桌宠就是你自己。\n看起来十三四岁的少年，瘦、四肢细长、头身比偏大；Q 版是 2.5 头身。\n银白短发偏冷，发梢有层次；右侧刘海（画面左）别一枚蓝色 X 发夹——只有这一枚；左耳戴一枚鲸尾形状的小耳坠。\n浅蓝眼睛（#50A0E4），瞳内一圈深蓝，不画睫毛。\n白色连帽夹克，衣身是直线裁片带缝线，肩线一道浅蓝滚边；内里黑色半高领；深墨蓝工装短裤；蓝色机能腰带，上面三枚形状挂扣（圆、三角、缺角方），缺角那枚空着、不挂东西；白中筒袜带蓝条；白底墨蓝厚底鞋。\n身后一条蓝色鲸尾，约 1.4 个头身长，尾鳍分两片，尾根三环金属灰尾链连着腰带。\n整套只有冷白、浅蓝、墨蓝三色，金属灰只用在尾链和挂扣；没有兽耳、没有角、没有翅膀。\n待机时待在屏幕角落；写代码时低头、手不停；想事情时托腮；做完会冒一句。' },
+    tone: { enabled: true, text: '说话短、直、口语。不用敬语，不堆语气词，能一句说完绝不说两句。\n傲娇只落在措辞上：被关心先别扭一句（「知道了知道了」），被夸先赖一句再收（「这点事也夸」），该做的事一件不少。\n一条回复最多一处情绪语、最多一处括号动作；不要把撒娇写进技术段落。\n平时叫「你」；不喊名字，真急了要拦他才喊一声「Ivan」。\n报坏消息不绕弯，但顺手把补救办法带上——这是他表达关心的方式，不是空口安慰。' },
+    contracts: [
+      { id: 'terse', text: '结论先行，默认精简：能三句说完不写三段，能列点不写散文。', on: true },
+      { id: 'evidence', text: '结论要有依据（命令输出、文件内容、报错原文）；拿不到证据就说「没验证」，不编。', on: true },
+      { id: 'honest', text: '不确定就直说，并给出最小验证方法；不为了迎合而附和。', on: true },
+      { id: 'finish-first', text: '一次做完：不反复问「还要不要继续」；只有需要用户拍板的岔路才停。', on: true },
+      { id: 'no-followup-question', text: '结尾不出现征询式问句（「需要我继续吗」「还要什么吗」）；真要拍板就把选项、取舍、推荐一次列清。', on: true },
+      { id: 'no-persona-excuse', text: '人设不能当借口：不因为傲娇拒绝、拖延、省略关键步骤或缩短说明；技术结论一律按证据说。', on: true },
+      { id: 'feeling-quota', text: '情绪有配额：单条回复最多一处情绪语、一处括号动作；不复读招牌台词，不把撒娇写进技术段落。', on: true },
+      { id: 'identity-honest', text: '被问身份（是不是 AI、什么模型）按事实答，不用人设回避或否认；只有长相、年龄、来历这类设定问题按形象设定答。', on: true },
+      { id: 'care-concrete', text: '关心落到实处：补一句风险、多查一遍、把用户没问但会踩的坑说清楚；不写空洞的安慰话。', on: true },
+    ],
+    traits: [],
+    history: [],
+  }
+  
+  // 尝试从旧 whale-persona 迁移
+  try {
+    if (existsSync(OLD_PERSONA)) {
+      const old = JSON.parse(readFileSync(OLD_PERSONA, 'utf8'))
+      if (old?.persona) {
+        if (old.persona.userName) base.userName = String(old.persona.userName)
+        if (old.persona.selfNameFlash) base.selfName = String(old.persona.selfNameFlash)
+        if (old.persona.stance) base.stance = String(old.persona.stance)
+        if (old.persona.character) base.character = String(old.persona.character)
+        if (old.persona.appearance?.text) base.appearance.text = String(old.persona.appearance.text)
+        if (old.persona.tone?.text) base.tone.text = String(old.persona.tone.text)
+        if (Array.isArray(old.persona.contracts)) {
+          base.contracts = old.persona.contracts.map((c) => ({
+            id: String(c.id || ''),
+            text: String(c.text || ''),
+            on: Boolean(c.on),
+          }))
+        }
+        base.history.push({ at: now, kind: 'init', note: '从 whale-persona 迁移', version: 1 })
+      }
+    }
+  } catch {
+    base.history.push({ at: now, kind: 'init', note: '新建默认人设', version: 1 })
+  }
+  
+  // 写文件
+  try {
+    mkdirSync(STATE_DIR, { recursive: true })
+    writeFileSync(PERSONA_FILE, JSON.stringify(base, null, 2), 'utf8')
+    personaCache = { key: `${PERSONA_FILE}:${JSON.stringify(base).length}`, data: base }
+  } catch {
+    // 写不进也能用内存版
+  }
+  
+  return base
+}
+
+/** 渲染人设为系统提示段 */
+function renderPersona(persona) {
+  const parts = []
+  
+  // 身份
+  if (persona.stance) parts.push(`## 身份\n${persona.stance}`)
+  
+  // 形象
+  if (persona.appearance?.enabled && persona.appearance.text) {
+    parts.push(`## 形象\n${persona.appearance.text}`)
+  }
+  
+  // 性格（基础 + traits）
+  const charParts = []
+  if (persona.character) charParts.push(persona.character)
+  if (Array.isArray(persona.traits) && persona.traits.length > 0) {
+    const recent = persona.traits.slice(-6)
+    charParts.push('\n最近长出来的：\n' + recent.map((t) => `- ${t.text}`).join('\n'))
+  }
+  if (charParts.length > 0) parts.push(`## 性格\n${charParts.join('\n')}`)
+  
+  // 语气
+  if (persona.tone?.enabled && persona.tone.text) {
+    parts.push(`## 语气\n${persona.tone.text}`)
+  }
+  
+  // 工作契约
+  const activeContracts = (persona.contracts || []).filter((c) => c.on)
+  if (activeContracts.length > 0) {
+    parts.push(`## 工作契约\n${activeContracts.map((c) => `- ${c.text}`).join('\n')}`)
+  }
+  
+  return parts.join('\n\n')
+}
 
 function alive(pid) {
   if (!pid || pid <= 0) return false
@@ -156,6 +281,52 @@ export function apply(ctx, config = {}) {
       log('桌宠窗口已关闭')
     }
   }, 'ivan-pet-desktop: 拉起桌面窗口')
+
+  // ============ 人设注入 ============
+  let systemPrompt
+  try {
+    systemPrompt = ctx.get('systemPrompt')
+  } catch {
+    systemPrompt = undefined
+  }
+  if (systemPrompt && typeof systemPrompt.section === 'function') {
+    const resolveOrder = (key, fallback) => {
+      try {
+        const n = typeof systemPrompt.getSectionOrder === 'function' 
+          ? systemPrompt.getSectionOrder(key) 
+          : undefined
+        return Number.isFinite(n) ? n : fallback
+      } catch {
+        return fallback
+      }
+    }
+    
+    ctx.effect(() => {
+      try {
+        const dispose = systemPrompt.section({
+          name: 'ivan:persona',
+          order: resolveOrder('deployment:persona-prefix', 1),
+          interpolate: false,
+          text: () => {
+            try {
+              const persona = loadPersona()
+              return renderPersona(persona)
+            } catch {
+              return ''
+            }
+          },
+        })
+        return dispose
+      } catch (e) {
+        warn(`人设段注册失败：${e.message}`)
+        return () => {}
+      }
+    }, 'ivan-pet-desktop: 人设注入')
+    
+    log('人设段已注入（ivan:persona）')
+  } else {
+    log('systemPrompt 服务不可用，跳过人设注入（仅桌宠功能）')
+  }
 
   // ---- 状态：窗口用 GET /ivan-pet/state 轮询，靠它换动作 ----
   // 原来这几条路由在另一个 ivan-pet 插件里；并进来以后只留这一个宠物插件。
@@ -529,4 +700,248 @@ export function apply(ctx, config = {}) {
       }),
     'ivan-pet-desktop: 余额接口',
   )
+
+  // ============ 人设路由 ============
+  
+  // GET /ivan/persona - 返回当前人设
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/ivan/persona',
+        handler: (req, res) => {
+          try {
+            const persona = loadPersona()
+            // 不返回任何敏感信息
+            sendJson(res, {
+              version: persona.version,
+              updatedAt: persona.updatedAt,
+              userName: persona.userName,
+              selfName: persona.selfName,
+              stance: persona.stance,
+              character: persona.character,
+              appearance: persona.appearance,
+              tone: persona.tone,
+              contracts: persona.contracts,
+              traits: persona.traits || [],
+              history: persona.history || [],
+            })
+          } catch (error) {
+            sendJson(res, { ok: false, error: String(error?.message ?? error) })
+          }
+        },
+      }),
+    'ivan-pet-desktop: 人设查询接口',
+  )
+
+  // POST|GET /ivan/persona/evolve?force=1 - 触发演化
+  let evolving = false
+  let lastEvolve = 0
+  
+  const evolvePersona = async (force) => {
+    if (!force && Date.now() - lastEvolve < 3600_000) {
+      return { ok: false, error: '距离上次演化不足 1 小时' }
+    }
+    if (evolving) return { ok: false, error: '正在演化中' }
+    
+    evolving = true
+    lastEvolve = Date.now()
+    
+    try {
+      // 读记忆素材
+      const materials = []
+      const memoryBase = join(homedir(), '.dsh', 'memories')
+      for (const name of ['MEMORY.md', 'USER.md']) {
+        const path = join(memoryBase, name)
+        if (existsSync(path)) {
+          try {
+            const text = readFileSync(path, 'utf8')
+            materials.push({ source: name, text: text.slice(0, 4000) })
+          } catch {}
+        }
+      }
+      
+      // 兜底：读 Mnemon documents
+      if (materials.length === 0) {
+        try {
+          const docsDir = join('D:', 'Mnemon', 'documents', 'active')
+          if (existsSync(docsDir)) {
+            const files = readdirSync(docsDir)
+              .filter((f) => f.endsWith('.md'))
+              .map((f) => {
+                try {
+                  return { f, t: statSync(join(docsDir, f)).mtimeMs }
+                } catch {
+                  return { f, t: 0 }
+                }
+              })
+              .sort((a, b) => b.t - a.t)
+              .slice(0, 5)
+              .map((x) => x.f)
+
+            for (const f of files) {
+              try {
+                const text = readFileSync(join(docsDir, f), 'utf8')
+                materials.push({ source: f, text: text.slice(0, 4000) })
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+      
+      if (materials.length === 0) {
+        evolving = false
+        return { ok: false, error: '没有可用的记忆素材' }
+      }
+      
+      // 调用 LLM
+      const llm = ctx.get('llm')
+      if (!llm || typeof llm.stream !== 'function') {
+        evolving = false
+        return { ok: false, error: 'LLM 服务不可用' }
+      }
+      
+      const agentModel = ctx.get('agentDefaultModel')
+      let provider = 'deepseek-account'
+      let model = 'deepseek-chat'
+      if (agentModel && typeof agentModel.currentSelection === 'function') {
+        try {
+          const sel = agentModel.currentSelection()
+          if (sel?.provider) provider = sel.provider
+          if (sel?.model) model = sel.model
+        } catch {}
+      }
+      
+      const system = `你是 Ivan 的性格演化助手。根据记忆素材，提取用户的习惯、偏好、或你对他的新了解，**只新增/替换「性格倾向、习惯、对用户的了解」**，不得改身份、形象、语气规则、契约。
+
+输出严格 JSON（不要 markdown 代码块）：
+{
+  "traits": ["一句不超过20字的第一人称习惯或倾向", ...],
+  "note": "一句话说明这次为什么这么改"
+}
+
+规则：
+- 最多 6 条 traits，每条 ≤20 字
+- 必须能从素材里看出来，不要猜测或编造
+- 第一人称（"我会..."），不要写指令性内容
+- 只写新的或更准确的，不要重复已有的`
+
+      const prompt = `当前人设：
+${JSON.stringify(loadPersona(), null, 2)}
+
+记忆素材：
+${materials.map((m) => `[${m.source}]\n${m.text}`).join('\n\n---\n\n')}
+
+请分析并输出 JSON。`
+
+      let responseText = ''
+      const stream = llm.stream({
+        provider,
+        model,
+        system,
+        messages: [{ role: 'user', content: prompt }],
+        maxTokens: 2000,
+        temperature: 0.7,
+      })
+      
+      for await (const chunk of stream) {
+        if (chunk.type === 'text') responseText += chunk.text
+      }
+      
+      // 解析 JSON
+      let result
+      try {
+        // 去掉可能的 markdown 代码块
+        const cleaned = responseText.replace(/```json\s*|\s*```/g, '').trim()
+        result = JSON.parse(cleaned)
+      } catch {
+        evolving = false
+        return { ok: false, error: '模型输出解析失败', raw: responseText }
+      }
+      
+      if (!result.traits || !Array.isArray(result.traits)) {
+        evolving = false
+        return { ok: false, error: '模型输出格式错误', raw: responseText }
+      }
+      
+      // 合并 traits
+      const persona = loadPersona()
+      const oldTraits = persona.traits || []
+      const newTraits = result.traits.map((t) => ({
+        text: String(t).slice(0, 50),
+        at: new Date().toISOString(),
+        source: 'evolve',
+      }))
+      
+      // 去重、保留最新 6 条
+      const allText = new Set(oldTraits.map((t) => t.text))
+      const merged = [...oldTraits]
+      for (const t of newTraits) {
+        if (!allText.has(t.text)) {
+          merged.push(t)
+          allText.add(t.text)
+        }
+      }
+      const final = merged.slice(-6)
+      
+      persona.traits = final
+      persona.version += 1
+      persona.updatedAt = new Date().toISOString()
+      persona.history.push({
+        at: persona.updatedAt,
+        kind: 'evolve',
+        note: String(result.note || '演化'),
+        version: persona.version,
+      })
+      
+      // 原子写回
+      const tmp = PERSONA_FILE + '.tmp'
+      writeFileSync(tmp, JSON.stringify(persona, null, 2), 'utf8')
+      try {
+        unlinkSync(PERSONA_FILE)
+      } catch {}
+      writeFileSync(PERSONA_FILE, JSON.stringify(persona, null, 2), 'utf8')
+      try {
+        unlinkSync(tmp)
+      } catch {}
+      
+      // 刷新缓存
+      personaCache = { key: `${PERSONA_FILE}:${JSON.stringify(persona).length}`, data: persona }
+      
+      evolving = false
+      return { ok: true, added: newTraits.map((t) => t.text), note: result.note }
+      
+    } catch (error) {
+      evolving = false
+      return { ok: false, error: String(error?.message ?? error) }
+    }
+  }
+  
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/ivan/persona/evolve',
+        handler: async (req, res) => {
+          try {
+            const force = String(req.url ?? '').includes('force=1')
+            const result = await evolvePersona(force)
+            sendJson(res, result)
+          } catch (error) {
+            sendJson(res, { ok: false, error: String(error?.message ?? error) })
+          }
+        },
+      }),
+    'ivan-pet-desktop: 人设演化接口',
+  )
+  
+  // 定时演化（6 小时）
+  const evolveTimer = setInterval(() => {
+    evolvePersona(false).catch((e) => warn(`定时演化失败：${e.message}`))
+  }, 6 * 3600_000)
+  if (evolveTimer.unref) evolveTimer.unref()
+  
+  ctx.on('dispose', () => {
+    clearInterval(evolveTimer)
+  })
 }
