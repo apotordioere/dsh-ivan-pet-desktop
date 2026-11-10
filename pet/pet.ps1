@@ -110,28 +110,6 @@ $img.RenderTransform = $tg
 
 $grid.Children.Add($img) | Out-Null
 
-# 说话按钮：常驻，点它开输入框
-$chatBtn = New-Object System.Windows.Controls.Border
-$chatBtn.Width = 26
-$chatBtn.Height = 26
-$chatBtn.CornerRadius = New-Object System.Windows.CornerRadius 13
-$chatBtn.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(210, 255, 255, 255))
-$chatBtn.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(60, 27, 42, 74))
-$chatBtn.BorderThickness = New-Object System.Windows.Thickness 1
-$chatBtn.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
-$chatBtn.VerticalAlignment = [System.Windows.VerticalAlignment]::Bottom
-$chatBtn.Margin = New-Object System.Windows.Thickness(0, 0, 4, 6)
-$chatBtn.Cursor = [System.Windows.Input.Cursors]::Hand
-$chatBtn.ToolTip = '跟我说话'
-$chatBtnText = New-Object System.Windows.Controls.TextBlock
-$chatBtnText.Text = '说'
-$chatBtnText.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
-$chatBtnText.FontSize = 11
-$chatBtnText.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
-$chatBtnText.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
-$chatBtnText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-$chatBtn.Child = $chatBtnText
-$grid.Children.Add($chatBtn) | Out-Null
 
 $win.Content = $grid
 
@@ -374,119 +352,81 @@ public class Win32Focus {
   } catch { }
 }
 
-# ---------- 说话框 ----------
+# ---------- 余额牌（DeepSeek 官方 + 中转站已用） ----------
 Add-Type -AssemblyName System.Net.Http | Out-Null
 $script:http = New-Object System.Net.Http.HttpClient
-$script:http.Timeout = [TimeSpan]::FromSeconds(60)
-$script:chatTask = $null
+$script:http.Timeout = [TimeSpan]::FromSeconds(20)
+$script:balTask = $null
+$script:balAt = [DateTime]::MinValue
 
-$chatWin = New-Object System.Windows.Window
-$chatWin.WindowStyle = [System.Windows.WindowStyle]::None
-$chatWin.AllowsTransparency = $true
-$chatWin.Background = [System.Windows.Media.Brushes]::Transparent
-$chatWin.Topmost = $true
-$chatWin.ShowInTaskbar = $false
-$chatWin.ResizeMode = [System.Windows.ResizeMode]::NoResize
-$chatWin.Width = 300
-$chatWin.Height = 112
-$chatWin.Visibility = [System.Windows.Visibility]::Collapsed
+$balPanel = New-Object System.Windows.Controls.Border
+$balPanel.CornerRadius = New-Object System.Windows.CornerRadius 8
+$balPanel.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(216, 255, 255, 255))
+$balPanel.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(44, 27, 42, 74))
+$balPanel.BorderThickness = New-Object System.Windows.Thickness 1
+$balPanel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+$balPanel.VerticalAlignment = [System.Windows.VerticalAlignment]::Bottom
+$balPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 3)
+$balPanel.Padding = New-Object System.Windows.Thickness(8, 2, 8, 3)
+$balPanel.IsHitTestVisible = $false
 
-$chatBorder = New-Object System.Windows.Controls.Border
-$chatBorder.CornerRadius = New-Object System.Windows.CornerRadius 14
-$chatBorder.Background = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(252, 255, 255, 255))
-$chatBorder.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(34, 14, 23, 41))
-$chatBorder.BorderThickness = New-Object System.Windows.Thickness 1
-$chatBorder.Padding = New-Object System.Windows.Thickness 12, 10, 12, 10
-$chatBorder.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius = 18; ShadowDepth = 2; Direction = 270; Opacity = 0.18; Color = [System.Windows.Media.Color]::FromRgb(14, 23, 41) }
+$balStack = New-Object System.Windows.Controls.StackPanel
+$balStack.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
 
-$chatHint = New-Object System.Windows.Controls.TextBlock
-$chatHint.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
-$chatHint.FontSize = 10.5
-$chatHint.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(150, 162, 184))
-$chatHint.Text = '跟我说点什么，回车发送'
-$chatHint.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
+$balLine1 = New-Object System.Windows.Controls.TextBlock
+$balLine1.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$balLine1.FontSize = 9.5
+$balLine1.TextAlignment = [System.Windows.TextAlignment]::Center
+$balLine1.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(27, 42, 74))
+$balLine1.Text = 'DeepSeek —'
 
-$chatBox = New-Object System.Windows.Controls.TextBox
-$chatBox.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
-$chatBox.FontSize = 13
-$chatBox.BorderThickness = New-Object System.Windows.Thickness 0
-$chatBox.Background = [System.Windows.Media.Brushes]::Transparent
-$chatBox.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(27, 42, 74))
-$chatBox.CaretBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
-$chatBox.AcceptsReturn = $false
+$balLine2 = New-Object System.Windows.Controls.TextBlock
+$balLine2.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
+$balLine2.FontSize = 8.5
+$balLine2.TextAlignment = [System.Windows.TextAlignment]::Center
+$balLine2.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(124, 136, 160))
+$balLine2.Text = '中转 —'
+$balLine2.Margin = New-Object System.Windows.Thickness(0, 1, 0, 0)
 
-$chatTitle = New-Object System.Windows.Controls.TextBlock
-$chatTitle.Text = '跟 Ivan 说'
-$chatTitle.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
-$chatTitle.FontSize = 11
-$chatTitle.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(80, 160, 228))
-$chatTitle.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+$balStack.Children.Add($balLine1) | Out-Null
+$balStack.Children.Add($balLine2) | Out-Null
+$balPanel.Child = $balStack
+$grid.Children.Add($balPanel) | Out-Null
 
-$chatClose = New-Object System.Windows.Controls.Button
-$chatClose.Content = '×'
-$chatClose.Width = 20
-$chatClose.Height = 20
-$chatClose.FontSize = 13
-$chatClose.FontFamily = New-Object System.Windows.Media.FontFamily('Microsoft YaHei')
-$chatClose.Padding = New-Object System.Windows.Thickness 0
-$chatClose.BorderThickness = New-Object System.Windows.Thickness 0
-$chatClose.Background = [System.Windows.Media.Brushes]::Transparent
-$chatClose.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(140, 152, 176))
-$chatClose.Cursor = [System.Windows.Input.Cursors]::Hand
-$chatClose.ToolTip = '关掉'
-$chatClose.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
-
-$chatHead = New-Object System.Windows.Controls.DockPanel
-$chatHead.LastChildFill = $true
-[System.Windows.Controls.DockPanel]::SetDock($chatClose, [System.Windows.Controls.Dock]::Right)
-$chatHead.Children.Add($chatClose) | Out-Null
-$chatHead.Children.Add($chatTitle) | Out-Null
-$chatHead.Margin = New-Object System.Windows.Thickness(0, 0, 0, 4)
-
-$chatStack = New-Object System.Windows.Controls.StackPanel
-$chatStack.Children.Add($chatHead) | Out-Null
-$chatStack.Children.Add($chatHint) | Out-Null
-$chatStack.Children.Add($chatBox) | Out-Null
-$chatBorder.Child = $chatStack
-$chatWin.Content = $chatBorder
-
-function Open-Chat {
+function Show-Balance($obj) {
   try {
-    $left = $win.Left - $chatWin.Width + $win.Width
-    if ($left -lt 8) { $left = 8 }
-    if ($left + $chatWin.Width -gt ([System.Windows.SystemParameters]::WorkArea.Right - 8)) {
-      $left = [System.Windows.SystemParameters]::WorkArea.Right - $chatWin.Width - 8
+    if ($obj.deepseek -and $obj.deepseek.ok) {
+      $cur = if ($obj.deepseek.currency -eq 'CNY') { '¥' } else { [string]$obj.deepseek.currency }
+      $money = [double]$obj.deepseek.balance
+      $balLine1.Text = ('DeepSeek {0}{1:N2}' -f $cur, $money)
+      if ($money -lt 10) {
+        $balLine1.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(163, 42, 34))
+      } else {
+        $balLine1.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromRgb(27, 42, 74))
+      }
+    } elseif ($obj.deepseek) {
+      $balLine1.Text = 'DeepSeek 读不到'
     }
-    $top = $win.Top - $chatWin.Height + 30
-    if ($top -lt 8) { $top = $win.Top + $win.Height - 40 }
-    $chatWin.Left = $left
-    $chatWin.Top = $top
-    $chatWin.Visibility = [System.Windows.Visibility]::Visible
-    $chatBox.Text = ''
-    $chatBox.Focus() | Out-Null
+    if ($obj.relay -and $obj.relay.ok) {
+      $used = [double]$obj.relay.totalUsed
+      $balLine2.Text = ('中转已用 ${0:N2}' -f $used)
+    } elseif ($obj.relay) {
+      $balLine2.Text = '中转读不到'
+    }
+    try { $script:tray.Text = "Ivan · " + $balLine1.Text + " · " + $balLine2.Text } catch { }
   } catch { }
 }
 
-function Close-Chat { $chatWin.Visibility = [System.Windows.Visibility]::Collapsed }
-
-$chatClose.Add_Click({ Close-Chat })
-
-function Send-Chat {
-  $text = ($chatBox.Text).Trim()
-  Close-Chat
-  if (-not $text) { return }
-  if (-not $script:Base) { Show-Toast '还没连上' 'DSH 那边没回应，等会儿再说' 4; return }
-  $url = "$($script:Base)/ivan-pet/chat?text=" + [Uri]::EscapeDataString($text)
-  Show-Toast '……' '' 60
-  try { $script:chatTask = $script:http.GetStringAsync($url) } catch { Show-Toast '说不出来' '请求没发出去' 4; $script:chatTask = $null }
+function Update-Balance([bool]$force) {
+  if (-not $script:Base) { return }
+  if ($script:balTask -ne $null) { return }
+  $url = "$($script:Base)/ivan-pet/balance"
+  if ($force) { $url += '?force=1' }
+  try {
+    $script:balTask = $script:http.GetStringAsync($url)
+    $script:balAt = [DateTime]::Now
+  } catch { $script:balTask = $null }
 }
-
-$chatBox.Add_KeyDown({
-    param($sender, $e)
-    if ($e.Key -eq [System.Windows.Input.Key]::Enter) { Send-Chat; $e.Handled = $true }
-    elseif ($e.Key -eq [System.Windows.Input.Key]::Escape) { Close-Chat; $e.Handled = $true }
-  })
-
 # ---------- 交互 ----------
 Add-Type @'
 using System;
@@ -641,6 +581,7 @@ $poll.Add_Tick({
       if (-not $cand) { return }
       $script:Base = $cand.TrimEnd('/')
       Write-Log "base=$($script:Base)"
+      try { Update-Balance $false } catch { }
     }
     try {
       $r = Invoke-RestMethod -Uri "$($script:Base)/ivan-pet/state" -TimeoutSec 1
@@ -657,6 +598,11 @@ $poll.Add_Tick({
       }
     }
   })
+
+# ---------- 余额轮询：每分钟拉一次 ----------
+$bal = New-Object System.Windows.Threading.DispatcherTimer
+$bal.Interval = [TimeSpan]::FromSeconds(60)
+$bal.Add_Tick({ try { Update-Balance $false } catch { } })
 
 # ---------- 画面刷新 ----------
 $ui = New-Object System.Windows.Threading.DispatcherTimer
@@ -718,21 +664,14 @@ $ui.Add_Tick({
       $script:ToastUntil = [DateTime]::MinValue
     }
 
-    # 说话：等模型回话
-    if ($script:chatTask -ne $null -and $script:chatTask.IsCompleted) {
-      $task = $script:chatTask
-      $script:chatTask = $null
+    # 余额：等上一次请求回来
+    if ($script:balTask -ne $null -and $script:balTask.IsCompleted) {
+      $task = $script:balTask
+      $script:balTask = $null
       try {
-        $raw = $task.Result
-        $obj = $raw | ConvertFrom-Json
-        if ($obj.ok) {
-          Show-Toast ([string]$obj.reply) '' 20
-        } else {
-          Show-Toast '说不出来' ([string]$obj.error) 5
-        }
-      } catch {
-        Show-Toast '说不出来' '线路不通，等会儿再试' 5
-      }
+        $obj = $task.Result | ConvertFrom-Json
+        Show-Balance $obj
+      } catch { }
     }
   })
 
@@ -751,9 +690,9 @@ if (-not $script:tray.Icon) { $script:tray.Icon = [System.Drawing.SystemIcons]::
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $trayMenu.Font = New-Object System.Drawing.Font('Microsoft YaHei', 9)
 
-$miChat = New-Object System.Windows.Forms.ToolStripMenuItem
-$miChat.Text = '跟我说话'
-$trayMenu.Items.Add($miChat) | Out-Null
+$miRefresh = New-Object System.Windows.Forms.ToolStripMenuItem
+$miRefresh.Text = '刷新余额'
+$trayMenu.Items.Add($miRefresh) | Out-Null
 
 $miDsh = New-Object System.Windows.Forms.ToolStripMenuItem
 $miDsh.Text = '回 DSH 看看'
@@ -772,7 +711,7 @@ $trayMenu.Items.Add($miQuit) | Out-Null
 
 $script:tray.ContextMenuStrip = $trayMenu
 
-$miChat.Add_Click({ try { $win.Visibility = [System.Windows.Visibility]::Visible; $win.Activate() | Out-Null; Open-Chat } catch { } })
+$miRefresh.Add_Click({ try { Update-Balance $true } catch { } })
 $miDsh.Add_Click({ Focus-Dsh })
 $miToggle.Add_Click({
     try {
@@ -787,20 +726,18 @@ $miToggle.Add_Click({
   })
 $miQuit.Add_Click({
     try { $script:tray.Visible = $false; $script:tray.Dispose() } catch { }
-    try { $poll.Stop(); $ui.Stop() } catch { }
-    try { $chatWin.Close() } catch { }
+    try { $poll.Stop(); $ui.Stop(); $bal.Stop() } catch { }
     try { $win.Close() } catch { }
     [System.Windows.Application]::Current.Shutdown()
   })
 
-$script:tray.Add_MouseDoubleClick({ try { $win.Visibility = [System.Windows.Visibility]::Visible; Open-Chat } catch { } })
+$script:tray.Add_MouseDoubleClick({ try { $win.Visibility = [System.Windows.Visibility]::Visible; $win.Activate() | Out-Null; Focus-Dsh } catch { } })
 $script:tray.Visible = $true
 Write-Log 'tray icon on'
 
 $win.Add_Closed({
-    $poll.Stop(); $ui.Stop()
+    $poll.Stop(); $ui.Stop(); $bal.Stop()
     try { $script:tray.Visible = $false; $script:tray.Dispose() } catch { }
-    try { $chatWin.Close() } catch { }
     [System.Windows.Application]::Current.Shutdown()
   })
 
@@ -809,6 +746,7 @@ $win.Show()
 Write-Log 'window shown'
 $poll.Start()
 $ui.Start()
+$bal.Start()
 
 if ($DemoToast) { Show-Bubble-TaskDone }
 

@@ -27,6 +27,7 @@ const DEFAULT_ASSETS = join(HERE, 'pet', 'assets')
 const STATE_DIR = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'ivan-pet-desktop')
 const PID_FILE = join(STATE_DIR, 'pet.pid')
 const BASE_FILE = join(STATE_DIR, 'base.txt')
+const CRED_PATH = join(homedir(), '.dsh', '.credentials.yaml')
 
 const PRIORITY = { idle: 0, pat: 1, speaking: 2, thinking: 3, coding: 4, done: 5, error: 6 }
 const TTL = { pat: 1200, done: 2600, error: 5000 }
@@ -277,17 +278,8 @@ export function apply(ctx, config = {}) {
     'ivan-pet-desktop: 状态接口',
   )
 
-  // ---- 对话：窗户里说的话，交给当前默认模型，用 Ivan 的口气回 ----
-  // 用 ctx.get 拿可选服务：宿主没有 llm 时对话不可用，但窗口照常。
-  const persona = [
-    '你是 Ivan，一个被造出来的仿生人少年，外形十三四岁，银色短发、浅蓝色眼睛，身后有一条鲸尾。',
-    '你在用户的桌面上陪着他。说话短、直、口语，一两句就够，最多 60 个字。',
-    '语气外冷内暖，偶尔傲娇，但不说教、不卖萌、不用表情符号，不列条目。',
-    '不要提自己是 AI 或模型，不要用"作为……"这类开头。',
-  ].join('\n')
-
-  const history = []
-
+  // ---- 余额：DeepSeek 官方账号 + code28 中转站，窗口每 60 秒拉一次 ----
+  // 两套凭据都在 ~/.dsh/.credentials.yaml 里，读出来只用在本机进程内，绝不发给浏览器/窗口。
   const sendJson = (res, body) => {
     try {
       const text = JSON.stringify(body)
@@ -300,48 +292,160 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: '/ivan-pet/chat',
-    handler: async (req, res) => {
-      try {
-        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-        const text = (url.searchParams.get('text') ?? '').trim().slice(0, 600)
-        if (!text) return sendJson(res, { ok: false, error: '空的' })
+  const BALANCE_ROUTE = '/ivan-pet/balance'
+  const RELAY_GATEWAY = 'https://code28.ccwu.cc'
+  const RELAY_QUOTA_PER_USD = 500000
+  const DS_ORIGIN = 'https://platform.deepseek.com'
+  const DS_RECORD = 'deepseek-account-platform/default'
+  const RELAY_KEYS = [
+    ['IMAGE2_API_KEY', '图'],
+    ['CLAUDE_API_KEY', 'Claude'],
+    ['GROK_API_KEY', 'grok'],
+    ['VIDEO_API_KEY', '视频'],
+    ['AXD_API_KEY', '安心蹬'],
+  ]
+  let balanceCache = { at: 0, data: null, inflight: null }
 
-        const llm = ctx.get('llm')
-        if (!llm) return sendJson(res, { ok: false, error: '宿主没有 llm 服务' })
+  const parseCreds = (text) => {
+    const out = {}
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^\s*([A-Z][A-Z0-9_]+):\s*['"]?([^'"\s#]+)/.exec(line)
+      if (m) out[m[1]] = m[2]
+    }
+    return out
+  }
 
-        let selection = {}
-        try {
-          selection = ctx.get('agentDefaultModel')?.currentSelection?.() ?? {}
-        } catch {
-          /* 拿不到就用兜底 */
-        }
-        const provider = selection.provider || 'deepseek-account'
-        const model = selection.model || 'deepseek-chat'
+  // .credentials.yaml 里 deepseek 的令牌是 records['deepseek-account-platform/default'].payload.token，
+  // 缩进嵌套，不引 YAML 库，按缩进切块抠出来。
+  const parseDeepseekGrant = (text) => {
+    const lines = text.split(/\r?\n/)
+    const idx = lines.findIndex((l) => l.includes(`${DS_RECORD}:`))
+    if (idx < 0) return null
+    const indent = lines[idx].match(/^\s*/)[0].length
+    let token = ''
+    let issuer = ''
+    for (let i = idx + 1; i < lines.length; i += 1) {
+      const line = lines[i]
+      if (!line.trim()) continue
+      if (line.match(/^\s*/)[0].length <= indent) break
+      const t = /token:\s*['"]?([^'"\s]+)/.exec(line)
+      if (t) token = t[1]
+      const s = /issuer:\s*['"]?([^'"\s]+)/.exec(line)
+      if (s) issuer = s[1]
+    }
+    return token ? { token, issuer: issuer || DS_ORIGIN } : null
+  }
 
-        const messages = [...history.slice(-6), { role: 'user', content: [{ type: 'text', text }] }]
-        let out = ''
-        for await (const chunk of llm.stream({ provider, model, system: persona, messages, maxTokens: 300, temperature: 0.9 })) {
-          if (chunk?.type === 'text-delta') out += chunk.text
-          else if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') {
-            throw new Error(chunk.reason.failure?.message || '模型断了')
-          }
-        }
-        out = out.trim()
-        if (!out) throw new Error('没有回话')
+  const relayUsage = async (key) => {
+    const res = await fetch(`${RELAY_GATEWAY}/api/usage/token`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const json = await res.json()
+    return json?.data ?? null
+  }
 
-        history.push(
-          { role: 'user', content: [{ type: 'text', text }] },
-          { role: 'assistant', content: [{ type: 'text', text: out }], source: { kind: 'model', provider, model } },
-        )
-        while (history.length > 8) history.shift()
+  const deepseekUsage = async (origin, token) => {
+    const res = await fetch(`${origin}/api/v0/users/get_user_summary`, {
+      headers: { 'x-dsh-auth-token': token },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const json = await res.json()
+    return json?.data?.biz_data ?? null
+  }
 
-        sendJson(res, { ok: true, reply: out })
-      } catch (error) {
-        sendJson(res, { ok: false, error: String(error?.message ?? error) })
+  const num = (v) => {
+    const n = Number.parseFloat(String(v ?? '0'))
+    return Number.isFinite(n) ? n : 0
+  }
+
+  const collectBalance = async () => {
+    const out = { ok: true, at: Date.now() }
+    let raw = ''
+    try {
+      raw = readFileSync(CRED_PATH, 'utf8')
+    } catch (error) {
+      return { ok: false, at: Date.now(), error: `读不到凭据：${error.message}` }
+    }
+    const creds = parseCreds(raw)
+
+    // DeepSeek 官方
+    try {
+      const grant = parseDeepseekGrant(raw)
+      if (!grant) throw new Error('凭据里没有 deepseek 账号令牌')
+      const biz = await deepseekUsage(grant.issuer, grant.token)
+      const wallet = biz?.normal_wallets?.[0] ?? {}
+      const bonus = biz?.bonus_wallets?.[0] ?? {}
+      const cost = biz?.total_costs?.[0] ?? {}
+      out.deepseek = {
+        ok: true,
+        currency: wallet.currency || 'CNY',
+        balance: num(wallet.balance),
+        bonus: num(bonus.balance),
+        totalCost: num(cost.amount),
       }
-    },
-  }), 'ivan-pet-desktop: 对话接口')
+    } catch (error) {
+      out.deepseek = { ok: false, error: String(error?.message ?? error) }
+    }
+
+    // 中转站：每个 key 查一次已用，再求和
+    const channels = []
+    let totalUsed = 0
+    let unlimited = true
+    await Promise.all(
+      RELAY_KEYS.map(async ([env, label]) => {
+        const key = creds[env]
+        try {
+          const data = await relayUsage(key)
+          const used = num(data?.total_used) / RELAY_QUOTA_PER_USD
+          const granted = num(data?.total_granted) / RELAY_QUOTA_PER_USD
+          const isUnlimited = data?.unlimited_quota === true
+          if (!isUnlimited) unlimited = false
+          totalUsed += used
+          channels.push({ label, ok: true, used, granted, unlimited: isUnlimited })
+        } catch (error) {
+          channels.push({ label, ok: false, error: String(error?.message ?? error) })
+        }
+      }),
+    )
+    channels.sort((a, b) => RELAY_KEYS.findIndex((k) => k[1] === a.label) - RELAY_KEYS.findIndex((k) => k[1] === b.label))
+    out.relay = { ok: channels.some((c) => c.ok), totalUsed, unlimited, channels }
+    return out
+  }
+
+  const getBalance = async (force) => {
+    const fresh = Date.now() - balanceCache.at < 60_000
+    if (!force && fresh && balanceCache.data) return balanceCache.data
+    if (balanceCache.inflight) return balanceCache.inflight
+    balanceCache.inflight = collectBalance()
+      .then((data) => {
+        balanceCache = { at: Date.now(), data, inflight: null }
+        return data
+      })
+      .catch((error) => {
+        balanceCache.inflight = null
+        throw error
+      })
+    return balanceCache.inflight
+  }
+
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: BALANCE_ROUTE,
+        handler: async (req, res) => {
+          try {
+            const force = String(req.url ?? '').includes('force=1')
+            const data = await getBalance(force)
+            sendJson(res, data)
+          } catch (error) {
+            sendJson(res, { ok: false, at: Date.now(), error: String(error?.message ?? error) })
+          }
+        },
+      }),
+    'ivan-pet-desktop: 余额接口',
+  )
 }
