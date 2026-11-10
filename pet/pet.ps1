@@ -32,8 +32,13 @@ $script:PollFails = 0
 if ($Base) { $script:Base = $Base.TrimEnd('/') }
 $script:LastState = 'idle'
 $script:PatUntil = [DateTime]::MinValue
+$script:Outfit = 'default'
+$script:OutfitFile = Join-Path $env:APPDATA 'ivan-pet\outfit.json'
 $script:BlinkUntil = [DateTime]::MinValue
 $script:NextBlink = [DateTime]::Now.AddSeconds(4)
+$script:ExprUntil = [DateTime]::MinValue
+$script:ExprName = 'laugh'
+$script:NextExpr = [DateTime]::Now.AddSeconds(10)
 $script:LatestState = 'idle'
 $script:ToastUntil = [DateTime]::MinValue
 $script:PosFile = Join-Path $env:APPDATA 'ivan-pet\pos.json'
@@ -162,8 +167,19 @@ $win.Add_MouseWheel({
 # ---------- 贴图 ----------
 $script:Cache = @{}
 function Get-Sprite([string]$name) {
-  if (-not $script:Cache.ContainsKey($name)) {
-    $path = Join-Path $script:Assets "$name.png"
+  $key = "$($script:Outfit)/$name"
+  if (-not $script:Cache.ContainsKey($key)) {
+    if ($script:Outfit -eq 'default') {
+      $path = Join-Path $script:Assets "$name.png"
+    } else {
+      $path = Join-Path $script:Assets (Join-Path 'outfits' (Join-Path $script:Outfit "$name.png"))
+    }
+    if (-not (Test-Path $path)) { $path = Join-Path $script:Assets "$name.png" }
+    if (-not (Test-Path $path)) {
+      if ($script:Outfit -ne 'default') {
+        $path = Join-Path $script:Assets (Join-Path 'outfits' (Join-Path $script:Outfit 'idle.png'))
+      }
+    }
     if (-not (Test-Path $path)) { $path = Join-Path $script:Assets 'idle.png' }
     $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
     $bmp.BeginInit()
@@ -171,9 +187,40 @@ function Get-Sprite([string]$name) {
     $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
     $bmp.EndInit()
     $bmp.Freeze()
-    $script:Cache[$name] = $bmp
+    $script:Cache[$key] = $bmp
   }
-  return $script:Cache[$name]
+  return $script:Cache[$key]
+}
+
+function Save-Outfit {
+  try {
+    $dir = Split-Path $script:OutfitFile -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $obj = @{ name = $script:Outfit } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($script:OutfitFile, $obj, [Text.UTF8Encoding]::new($false))
+  } catch { }
+}
+
+function Set-Outfit([string]$name) {
+  if (-not $name) { $name = 'default' }
+  $script:Outfit = $name
+  $script:Cache = @{}
+  try { Set-Frame $script:LatestState } catch { }
+  Save-Outfit
+  Write-Log "outfit=$name"
+}
+
+function Load-Outfit {
+  try {
+    Write-Log "outfit file: $($script:OutfitFile) exists=$(Test-Path $script:OutfitFile)"
+    if (Test-Path $script:OutfitFile) {
+      $obj = Get-Content $script:OutfitFile -Raw | ConvertFrom-Json
+      if ($obj.name) { $script:Outfit = [string]$obj.name }
+    }
+    Write-Log "outfit loaded: $($script:Outfit)"
+  } catch {
+    Write-Log "outfit load failed: $($_.Exception.Message)"
+  }
 }
 
 function Set-Frame([string]$name) {
@@ -658,6 +705,14 @@ $ui.Add_Tick({
     $show = $st
     if (($st -eq 'idle' -or $st -eq 'speaking') -and [DateTime]::Now -lt $script:PatUntil) { $show = 'pat' }
     if (($st -eq 'idle' -or $st -eq 'speaking') -and [DateTime]::Now -ge $script:PatUntil) {
+      if ($script:Outfit -eq 'default' -and [DateTime]::Now -ge $script:NextExpr) {
+        $script:ExprName = Get-Random -InputObject @('laugh', 'shy', 'sleepy')
+        $script:ExprUntil = [DateTime]::Now.AddMilliseconds(1900)
+        $script:NextExpr = [DateTime]::Now.AddSeconds(18 + (Get-Random -Minimum 0 -Maximum 32))
+      }
+      if ($script:Outfit -eq 'default' -and [DateTime]::Now -lt $script:ExprUntil) {
+        $show = 'expr_' + $script:ExprName
+      }
       if ([DateTime]::Now -ge $script:NextBlink) {
         $script:BlinkUntil = [DateTime]::Now.AddMilliseconds(110)
         $script:NextBlink = [DateTime]::Now.AddSeconds(3 + (Get-Random -Minimum 0 -Maximum 35) / 10)
@@ -701,6 +756,19 @@ $miRefresh = New-Object System.Windows.Forms.ToolStripMenuItem
 $miRefresh.Text = '刷新余额'
 $trayMenu.Items.Add($miRefresh) | Out-Null
 
+$miOutfit = New-Object System.Windows.Forms.ToolStripMenuItem
+$miOutfit.Text = '换衣服'
+$miOutfitDefault = New-Object System.Windows.Forms.ToolStripMenuItem
+$miOutfitDefault.Text = '日常（默认）'
+$miOutfitPajama = New-Object System.Windows.Forms.ToolStripMenuItem
+$miOutfitPajama.Text = '睡衣'
+$miOutfitWinter = New-Object System.Windows.Forms.ToolStripMenuItem
+$miOutfitWinter.Text = '冬装'
+$miOutfit.DropDownItems.Add($miOutfitDefault) | Out-Null
+$miOutfit.DropDownItems.Add($miOutfitPajama) | Out-Null
+$miOutfit.DropDownItems.Add($miOutfitWinter) | Out-Null
+$trayMenu.Items.Add($miOutfit) | Out-Null
+
 $miDsh = New-Object System.Windows.Forms.ToolStripMenuItem
 $miDsh.Text = '回 DSH 看看'
 $trayMenu.Items.Add($miDsh) | Out-Null
@@ -719,6 +787,18 @@ $trayMenu.Items.Add($miQuit) | Out-Null
 $script:tray.ContextMenuStrip = $trayMenu
 
 $miRefresh.Add_Click({ try { Update-Balance $true } catch { } })
+
+function Sync-OutfitMenu {
+  try {
+    $miOutfitDefault.Checked = ($script:Outfit -eq 'default')
+    $miOutfitPajama.Checked = ($script:Outfit -eq 'pajama')
+    $miOutfitWinter.Checked = ($script:Outfit -eq 'winter')
+  } catch { }
+}
+
+$miOutfitDefault.Add_Click({ try { Set-Outfit 'default'; Sync-OutfitMenu } catch { } })
+$miOutfitPajama.Add_Click({ try { Set-Outfit 'pajama'; Sync-OutfitMenu } catch { } })
+$miOutfitWinter.Add_Click({ try { Set-Outfit 'winter'; Sync-OutfitMenu } catch { } })
 $miDsh.Add_Click({ Focus-Dsh })
 $miToggle.Add_Click({
     try {
@@ -752,6 +832,8 @@ $win.Add_Closed({
     [System.Windows.Application]::Current.Shutdown()
   })
 
+Load-Outfit
+try { Sync-OutfitMenu } catch { }
 Write-Log 'window creating'
 $win.Show()
 Write-Log 'window shown'

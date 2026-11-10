@@ -34,6 +34,14 @@ plugin_manager install_bundle  target: "link:D:\\path\\to\\dsh-ivan-pet-desktop"
 
 装完即启用（`dsh.bundle.patch` 会往组合里插一条 `ivan-pet-desktop`）。停用插件，窗口进程会被一起收掉。
 
+## 换衣服 / 表情
+
+- **换衣服**：右键托盘图标 →「换衣服」→ 日常（默认）/ 睡衣 / 冬装。当前选择存在 `%APPDATA%\ivan-pet\outfit.json`，下次启动沿用。
+  - 每套衣服都是完整的 7 帧（idle / blink / thinking / coding / done / error / pat），放在 `pet/assets/outfits/<套名>/`；
+  - 缺某帧时先回落到同套的 `idle`，再回落到默认套，不会出现半套衣服。
+- **表情**：日常（默认）状态下，闲着的时候会随机换成笑 / 困 / 害羞三种表情（`expr_laugh.png` / `expr_sleepy.png` / `expr_shy.png`，另有 `expr_angry.png`），亮 1.9 秒后回到站姿，间隔 18–50 秒。
+  - 表情图只做了默认那套，所以穿睡衣/冬装时不会冒表情，避免衣服串掉。
+
 ## 配置
 
 ```yaml
