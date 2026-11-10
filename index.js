@@ -14,6 +14,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -336,10 +337,31 @@ export function apply(ctx, config = {}) {
     return token ? { token, issuer: issuer || DS_ORIGIN } : null
   }
 
+  // 旧的 Node 没有 AbortSignal.timeout；这里兜一层，拿不到就退回不限时（网关自己有超时）
+  const withTimeout = async (url, init, ms = 8000) => {
+    let signal
+    let timer
+    try {
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        signal = AbortSignal.timeout(ms)
+      } else if (typeof AbortController === 'function') {
+        const controller = new AbortController()
+        signal = controller.signal
+        timer = setTimeout(() => controller.abort(), ms)
+      }
+    } catch {
+      signal = undefined
+    }
+    try {
+      return await fetch(url, { ...init, signal })
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   const relayUsage = async (key) => {
-    const res = await fetch(`${RELAY_GATEWAY}/api/usage/token`, {
+    const res = await withTimeout(`${RELAY_GATEWAY}/api/usage/token`, {
       headers: { authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(8000),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const json = await res.json()
@@ -347,13 +369,50 @@ export function apply(ctx, config = {}) {
   }
 
   const deepseekUsage = async (origin, token) => {
-    const res = await fetch(`${origin}/api/v0/users/get_user_summary`, {
+    const res = await withTimeout(`${origin}/api/v0/users/get_user_summary`, {
       headers: { 'x-dsh-auth-token': token },
-      signal: AbortSignal.timeout(8000),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const json = await res.json()
     return json?.data?.biz_data ?? null
+  }
+
+  // 中转站的「余额」在账号层：要站点访问令牌（后台「个人设置 → 访问令牌」生成），
+  // sk-key 只能看自己花了多少。配置放 %APPDATA%\\ivan-pet-desktop\\relay.json：
+  // { "accessToken": "...", "userId": "1" }
+  const RELAY_CFG = join(homedir(), 'AppData', 'Roaming', 'ivan-pet-desktop', 'relay.json')
+
+  const readRelayCfg = () => {
+    try {
+      if (!existsSync(RELAY_CFG)) return null
+      const cfg = JSON.parse(readFileSync(RELAY_CFG, 'utf8'))
+      if (!cfg || !cfg.accessToken) return null
+      return { accessToken: String(cfg.accessToken), userId: String(cfg.userId ?? '1') }
+    } catch {
+      return null
+    }
+  }
+
+  const relayAccount = async (cfg) => {
+    if (!cfg) return null
+    const res = await withTimeout(`${RELAY_GATEWAY}/api/user/self`, {
+      headers: {
+        authorization: `Bearer ${cfg.accessToken}`,
+        'new-api-user': cfg.userId,
+        accept: 'application/json',
+      },
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const json = await res.json()
+    if (json?.success === false) throw new Error(json?.message || '访问令牌无效')
+    const data = json?.data ?? {}
+    const quota = num(data.quota)
+    return {
+      quota,
+      balanceUsd: quota / RELAY_QUOTA_PER_USD,
+      usedUsd: num(data.used_quota) / RELAY_QUOTA_PER_USD,
+      name: data.display_name || data.username || '',
+    }
   }
 
   const num = (v) => {
@@ -365,7 +424,7 @@ export function apply(ctx, config = {}) {
     const out = { ok: true, at: Date.now() }
     let raw = ''
     try {
-      raw = readFileSync(CRED_PATH, 'utf8')
+      raw = await readFile(CRED_PATH, 'utf8')
     } catch (error) {
       return { ok: false, at: Date.now(), error: `读不到凭据：${error.message}` }
     }
@@ -390,28 +449,50 @@ export function apply(ctx, config = {}) {
       out.deepseek = { ok: false, error: String(error?.message ?? error) }
     }
 
-    // 中转站：每个 key 查一次已用，再求和
-    const channels = []
-    let totalUsed = 0
-    let unlimited = true
-    await Promise.all(
-      RELAY_KEYS.map(async ([env, label]) => {
-        const key = creds[env]
-        try {
-          const data = await relayUsage(key)
-          const used = num(data?.total_used) / RELAY_QUOTA_PER_USD
-          const granted = num(data?.total_granted) / RELAY_QUOTA_PER_USD
-          const isUnlimited = data?.unlimited_quota === true
-          if (!isUnlimited) unlimited = false
-          totalUsed += used
-          channels.push({ label, ok: true, used, granted, unlimited: isUnlimited })
-        } catch (error) {
-          channels.push({ label, ok: false, error: String(error?.message ?? error) })
-        }
-      }),
-    )
-    channels.sort((a, b) => RELAY_KEYS.findIndex((k) => k[1] === a.label) - RELAY_KEYS.findIndex((k) => k[1] === b.label))
-    out.relay = { ok: channels.some((c) => c.ok), totalUsed, unlimited, channels }
+    // 中转站：账号余额（要令牌）+ 每个 key 的已用，并行查、各自收集，最后统一汇总（不在并发里改共享变量）
+    const relayCfg = readRelayCfg()
+    const [accountResult, channelResult] = await Promise.all([
+      relayAccount(relayCfg).then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error: String(error?.message ?? error) }),
+      ),
+      Promise.all(
+        RELAY_KEYS.map(async ([env, label]) => {
+          try {
+            const data = await relayUsage(creds[env])
+            return {
+              label,
+              ok: true,
+              used: num(data?.total_used) / RELAY_QUOTA_PER_USD,
+              granted: num(data?.total_granted) / RELAY_QUOTA_PER_USD,
+              unlimited: data?.unlimited_quota !== false,
+            }
+          } catch (error) {
+            return { label, ok: false, error: String(error?.message ?? error) }
+          }
+        }),
+      ),
+    ])
+
+    const channels = channelResult.filter((c) => c.ok)
+    const totalUsed = channels.reduce((sum, c) => sum + c.used, 0)
+    const unlimited = channels.length > 0 && channels.every((c) => c.unlimited)
+
+    out.relay = {
+      ok: channels.length > 0,
+      hasToken: Boolean(relayCfg),
+      totalUsed,
+      unlimited,
+      channels,
+      balance: accountResult.ok ? accountResult.value ?? null : null,
+      balanceError: !relayCfg
+        ? '未配置站点访问令牌（%APPDATA%\\ivan-pet-desktop\\relay.json）'
+        : accountResult.ok
+          ? accountResult.value
+            ? null
+            : '访问令牌查不到账号'
+          : accountResult.error,
+    }
     return out
   }
 

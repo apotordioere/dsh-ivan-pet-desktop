@@ -407,13 +407,20 @@ function Show-Balance($obj) {
     } elseif ($obj.deepseek) {
       $balLine1.Text = 'DeepSeek 读不到'
     }
-    if ($obj.relay -and $obj.relay.ok) {
+    if ($obj.relay) {
+      if ($obj.relay.balance) {
+        $balLine2.Text = ('中转余额 ${0:N2}' -f [double]$obj.relay.balance.balanceUsd)
+      } elseif ($obj.relay.hasToken) {
+        $balLine2.Text = '中转余额 读不到'
+      } else {
+        $balLine2.Text = '中转余额 未配置'
+      }
       $used = [double]$obj.relay.totalUsed
-      $balLine2.Text = ('中转已用 ${0:N2}' -f $used)
-    } elseif ($obj.relay) {
-      $balLine2.Text = '中转读不到'
+      $balPanel.ToolTip = ('中转已用 ${0:N2}' -f $used)
     }
-    try { $script:tray.Text = "Ivan · " + $balLine1.Text + " · " + $balLine2.Text } catch { }
+    if ($script:tray) {
+      try { $script:tray.Text = "Ivan · " + $balLine1.Text + " · " + $balLine2.Text } catch { }
+    }
   } catch { }
 }
 
@@ -727,6 +734,8 @@ $miToggle.Add_Click({
 $miQuit.Add_Click({
     try { $script:tray.Visible = $false; $script:tray.Dispose() } catch { }
     try { $poll.Stop(); $ui.Stop(); $bal.Stop() } catch { }
+    try { $script:http.CancelPendingRequests() } catch { }
+    $script:balTask = $null
     try { $win.Close() } catch { }
     [System.Windows.Application]::Current.Shutdown()
   })
@@ -737,6 +746,8 @@ Write-Log 'tray icon on'
 
 $win.Add_Closed({
     $poll.Stop(); $ui.Stop(); $bal.Stop()
+    try { $script:http.CancelPendingRequests() } catch { }
+    $script:balTask = $null
     try { $script:tray.Visible = $false; $script:tray.Dispose() } catch { }
     [System.Windows.Application]::Current.Shutdown()
   })
