@@ -161,6 +161,9 @@ export function apply(ctx, config = {}) {
   let current = { state: 'idle', since: Date.now() }
   let decayTimer = null
   let decayTo = 'idle'
+  // 这一轮有没有真干过活：不能靠 current.state 判断——assistant 开始吐字后状态会落到
+  // speaking（优先级低于 coding），轮到 idle 时看 current.state 就以为"没忙过"，气泡永远不弹。
+  let busy = false
 
   const clearDecay = () => {
     if (decayTimer !== null) {
@@ -195,11 +198,15 @@ export function apply(ctx, config = {}) {
         const status = payload?.status
         const sessionId = payload?.agent?.sessionId ?? payload?.agent?.id
         if (status === 'running') {
+          busy = true
           set('thinking', { sessionId })
         } else if (status === 'idle') {
-          const wasBusy = PRIORITY[current.state] >= PRIORITY.coding
-          if (wasBusy) set('done', { sessionId, force: true })
-          else set('idle', { sessionId, force: true })
+          if (busy) {
+            busy = false
+            set('done', { sessionId, force: true, ttlMs: TTL.done })
+          } else {
+            set('idle', { sessionId, force: true })
+          }
         }
       }),
     )
@@ -210,10 +217,16 @@ export function apply(ctx, config = {}) {
       }),
     )
 
-    offs.push(ctx.on('tools/result', () => set('coding', {})))
+    offs.push(
+      ctx.on('tools/result', (payload) => {
+        busy = true
+        set('coding', { sessionId: payload?.agent?.sessionId ?? payload?.agent?.id })
+      }),
+    )
 
     offs.push(
       ctx.on('agent/error', (payload) => {
+        busy = false
         set('error', {
           sessionId: payload?.agent?.sessionId ?? payload?.agent?.id,
           force: true,
