@@ -41,6 +41,9 @@ $script:NextBlink = [DateTime]::Now.AddSeconds(4)
 $script:ExprUntil = [DateTime]::MinValue
 $script:ExprName = 'laugh'
 $script:NextExpr = [DateTime]::Now.AddSeconds(10)
+$script:PoseUntil = [DateTime]::MinValue
+$script:PoseName = 'stretch'
+$script:NextPose = [DateTime]::Now.AddSeconds(25)
 $script:LatestState = 'idle'
 $script:ToastUntil = [DateTime]::MinValue
 $script:PosFile = Join-Path $env:APPDATA 'ivan-pet\pos.json'
@@ -944,13 +947,24 @@ $ui.Add_Tick({
     $show = $st
     if (($st -eq 'idle' -or $st -eq 'speaking') -and [DateTime]::Now -lt $script:PatUntil) { $show = 'pat' }
     if (($st -eq 'idle' -or $st -eq 'speaking') -and [DateTime]::Now -ge $script:PatUntil) {
-      if ($script:Outfit -eq 'default' -and [DateTime]::Now -ge $script:NextExpr) {
+      $poseActive = ([DateTime]::Now -lt $script:PoseUntil)
+      $exprActive = ([DateTime]::Now -lt $script:ExprUntil)
+      $toastUp = ($script:ToastUntil -ne [DateTime]::MinValue)
+      if ($script:Outfit -eq 'default' -and -not $poseActive -and -not $exprActive -and [DateTime]::Now -ge $script:NextExpr) {
         $script:ExprName = Get-Random -InputObject @('laugh', 'shy', 'sleepy')
         $script:ExprUntil = [DateTime]::Now.AddMilliseconds(1900)
         $script:NextExpr = [DateTime]::Now.AddSeconds(18 + (Get-Random -Minimum 0 -Maximum 32))
       }
+      if ($script:Outfit -eq 'default' -and -not $toastUp -and -not $exprActive -and [DateTime]::Now -ge $script:NextPose) {
+        $script:PoseName = Get-Random -InputObject @('stretch', 'wave', 'lookback', 'play_tail')
+        $script:PoseUntil = [DateTime]::Now.AddMilliseconds(2600 + (Get-Random -Minimum 0 -Maximum 1000))
+        $script:NextPose = [DateTime]::Now.AddSeconds(35 + (Get-Random -Minimum 0 -Maximum 55))
+      }
       if ($script:Outfit -eq 'default' -and [DateTime]::Now -lt $script:ExprUntil) {
         $show = 'expr_' + $script:ExprName
+      }
+      if ($script:Outfit -eq 'default' -and [DateTime]::Now -lt $script:PoseUntil) {
+        $show = 'pose_' + $script:PoseName
       }
       if ([DateTime]::Now -ge $script:NextBlink) {
         $script:BlinkUntil = [DateTime]::Now.AddMilliseconds(110)
@@ -997,15 +1011,25 @@ $trayMenu.Items.Add($miRefresh) | Out-Null
 
 $miOutfit = New-Object System.Windows.Forms.ToolStripMenuItem
 $miOutfit.Text = '换衣服'
-$miOutfitDefault = New-Object System.Windows.Forms.ToolStripMenuItem
-$miOutfitDefault.Text = '日常（默认）'
-$miOutfitPajama = New-Object System.Windows.Forms.ToolStripMenuItem
-$miOutfitPajama.Text = '睡衣'
-$miOutfitWinter = New-Object System.Windows.Forms.ToolStripMenuItem
-$miOutfitWinter.Text = '冬装'
-$miOutfit.DropDownItems.Add($miOutfitDefault) | Out-Null
-$miOutfit.DropDownItems.Add($miOutfitPajama) | Out-Null
-$miOutfit.DropDownItems.Add($miOutfitWinter) | Out-Null
+$script:OutfitTable = @(
+  @{ id = 'default'; label = '日常（默认）' },
+  @{ id = 'pajama';  label = '睡衣' },
+  @{ id = 'winter';  label = '冬装' },
+  @{ id = 'uniform'; label = '学院' },
+  @{ id = 'sailor';  label = '水手' },
+  @{ id = 'yukata';  label = '浴衣' },
+  @{ id = 'street';  label = '街头' },
+  @{ id = 'suit';    label = '西装' }
+)
+$script:OutfitItems = @{}
+foreach ($entry in $script:OutfitTable) {
+  $miOne = New-Object System.Windows.Forms.ToolStripMenuItem
+  $miOne.Text = [string]$entry.label
+  $miOne.Tag = [string]$entry.id
+  $miOne.Add_Click({ param($sender, $e) try { Set-Outfit ([string]$sender.Tag); Sync-OutfitMenu } catch { } })
+  $miOutfit.DropDownItems.Add($miOne) | Out-Null
+  $script:OutfitItems[[string]$entry.id] = $miOne
+}
 $trayMenu.Items.Add($miOutfit) | Out-Null
 
 $miSay = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1082,15 +1106,12 @@ $miRefresh.Add_Click({ try { Update-Balance $true } catch { } })
 
 function Sync-OutfitMenu {
   try {
-    $miOutfitDefault.Checked = ($script:Outfit -eq 'default')
-    $miOutfitPajama.Checked = ($script:Outfit -eq 'pajama')
-    $miOutfitWinter.Checked = ($script:Outfit -eq 'winter')
+    foreach ($k in $script:OutfitItems.Keys) {
+      $script:OutfitItems[$k].Checked = ($script:Outfit -eq $k)
+    }
   } catch { }
 }
 
-$miOutfitDefault.Add_Click({ try { Set-Outfit 'default'; Sync-OutfitMenu } catch { } })
-$miOutfitPajama.Add_Click({ try { Set-Outfit 'pajama'; Sync-OutfitMenu } catch { } })
-$miOutfitWinter.Add_Click({ try { Set-Outfit 'winter'; Sync-OutfitMenu } catch { } })
 $miSay.Add_Click({ try { Show-Chatter } catch { } })
 $miChatter.Add_Click({
     try {
