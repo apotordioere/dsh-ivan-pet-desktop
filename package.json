@@ -17,11 +17,13 @@
   ],
   "exports": {
     ".": "./index.js",
+    "./client": "./client/client.js",
     "./pet/pet.ps1": "./pet/pet.ps1",
     "./pet/assets/*.png": "./pet/assets/*.png"
   },
   "files": [
     "index.js",
+    "client",
     "cordis.patch.yml",
     "pet",
     "README.md",
@@ -30,6 +32,10 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
     }
   },
   "engines": {

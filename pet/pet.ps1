@@ -4,6 +4,7 @@
   [int]$Height = 282,
   [string]$Base = '',
   [switch]$DemoToast,
+  [string]$DemoTitle = '',
   [switch]$DemoChatter
 )
 
@@ -211,10 +212,12 @@ function Set-Outfit([string]$name) {
   Write-Log "outfit=$name"
 }
 
-# ---------- 主题：把四张特写设成桌面壁纸 ----------
-$script:ThemeFile = Join-Path $env:APPDATA 'ivan-pet-desktop\theme.json'
+# ---------- 界面背景主题 & 桌面壁纸 ----------
+$script:UIThemeFile = Join-Path $env:APPDATA 'ivan-pet-desktop\ui-theme.json'
+$script:WallpaperThemeFile = Join-Path $env:APPDATA 'ivan-pet-desktop\theme.json'
 $script:ThemeDir = Join-Path $Assets 'theme'
-$script:ThemeName = ''
+$script:UIThemeName = ''
+$script:WallpaperThemeName = ''
 
 Add-Type @"
 using System;
@@ -236,40 +239,68 @@ function Get-CurrentWallpaper {
   return ''
 }
 
-function Read-ThemeState {
+function Read-WallpaperState {
   try {
-    if (Test-Path $script:ThemeFile) {
-      return (Get-Content $script:ThemeFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+    if (Test-Path $script:WallpaperThemeFile) {
+      return (Get-Content $script:WallpaperThemeFile -Raw -Encoding UTF8 | ConvertFrom-Json)
     }
   } catch { }
   return $null
 }
 
-function Save-ThemeState($name, $previous) {
+function Save-WallpaperState($name, $previous) {
   try {
     $obj = @{ name = $name; previous = $previous; at = (Get-Date).ToString('s') }
-    [IO.File]::WriteAllText($script:ThemeFile, ($obj | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($script:WallpaperThemeFile, ($obj | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
   } catch { }
 }
 
-function Set-Theme([string]$name, [switch]$Quiet) {
+function Read-UIThemeState {
+  try {
+    if (Test-Path $script:UIThemeFile) {
+      return (Get-Content $script:UIThemeFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+    }
+  } catch { }
+  return $null
+}
+
+function Save-UIThemeState($name) {
+  try {
+    $obj = @{ name = $name; at = (Get-Date).ToString('s') }
+    $dir = Split-Path $script:UIThemeFile -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [IO.File]::WriteAllText($script:UIThemeFile, ($obj | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+  } catch { }
+}
+
+function Set-UITheme([string]$name) {
   $img = Join-Path $script:ThemeDir ($name + '.jpg')
-  if (-not (Test-Path $img)) { if (-not $Quiet) { Write-Log "theme missing: $name" }; return $false }
-  $state = Read-ThemeState
+  if (-not (Test-Path $img)) { Write-Log "ui theme missing: $name"; return $false }
+  $script:UIThemeName = $name
+  Save-UIThemeState $name
+  Write-Log "ui theme -> $name"
+  Show-Toast '界面背景已切换' '刷新页面（F5）才看得到' 6
+  return $true
+}
+
+function Set-WallpaperTheme([string]$name, [switch]$Quiet) {
+  $img = Join-Path $script:ThemeDir ($name + '.jpg')
+  if (-not (Test-Path $img)) { if (-not $Quiet) { Write-Log "wallpaper theme missing: $name" }; return $false }
+  $state = Read-WallpaperState
   $prev = ''
   if ($state -and $state.previous) { $prev = $state.previous } else { $prev = Get-CurrentWallpaper }
   $ok = $false
   try { $ok = [PetWall]::SystemParametersInfo(0x0014, 0, $img, 0x01 -bor 0x02) } catch { }
   if ($ok) {
-    $script:ThemeName = $name
-    Save-ThemeState $name $prev
+    $script:WallpaperThemeName = $name
+    Save-WallpaperState $name $prev
     Write-Log "wallpaper -> $name"
   }
   return $ok
 }
 
 function Restore-Wallpaper {
-  $state = Read-ThemeState
+  $state = Read-WallpaperState
   if (-not $state -or -not $state.previous) { Write-Log 'no previous wallpaper'; return }
   $prev = [string]$state.previous
   if ($prev -and (Test-Path $prev)) {
@@ -278,21 +309,34 @@ function Restore-Wallpaper {
   } else {
     Write-Log "previous wallpaper gone: $prev"
   }
-  $script:ThemeName = ''
-  Save-ThemeState '' ''
+  $script:WallpaperThemeName = ''
+  Save-WallpaperState '' ''
 }
 
-function Sync-ThemeMenu {
+function Sync-UIThemeMenu {
   try {
-    foreach ($k in $script:ThemeItems.Keys) { $script:ThemeItems[$k].Checked = ($script:ThemeName -eq $k) }
+    foreach ($k in $script:UIThemeItems.Keys) { $script:UIThemeItems[$k].Checked = ($script:UIThemeName -eq $k) }
   } catch { }
 }
 
-function Load-Theme {
-  $state = Read-ThemeState
+function Sync-WallpaperThemeMenu {
+  try {
+    foreach ($k in $script:WallpaperThemeItems.Keys) { $script:WallpaperThemeItems[$k].Checked = ($script:WallpaperThemeName -eq $k) }
+  } catch { }
+}
+
+function Load-UITheme {
+  $state = Read-UIThemeState
   if ($state -and $state.name) {
-    $script:ThemeName = [string]$state.name
-    Set-Theme $script:ThemeName -Quiet | Out-Null
+    $script:UIThemeName = [string]$state.name
+  }
+}
+
+function Load-WallpaperTheme {
+  $state = Read-WallpaperState
+  if ($state -and $state.name) {
+    $script:WallpaperThemeName = [string]$state.name
+    Set-WallpaperTheme $script:WallpaperThemeName -Quiet | Out-Null
   }
 }
 
@@ -442,6 +486,12 @@ function Show-Toast([string]$title, [string]$sub, [int]$seconds = 6) {
   $top = $win.Top - $th + 6
   if ($top -lt 4) { $top = $win.Top + $win.Height - 10 }
   if ($left -lt 4) { $left = 4 }
+  # 靠屏幕右边时把气泡整体推回工作区，避免长标题被裁掉
+  $wa = [System.Windows.SystemParameters]::WorkArea
+  $toast.MaxWidth = 380
+  if ($left + $tw -gt ($wa.Right - 8)) { $left = $wa.Right - $tw - 8 }
+  if ($left -lt ($wa.Left + 8)) { $left = $wa.Left + 8 }
+  if ($top + $th -gt ($wa.Bottom - 8)) { $top = $wa.Bottom - $th - 8 }
   $toast.Left = $left
   $toast.Top = $top
   $script:ToastUntil = [DateTime]::Now.AddSeconds($seconds)
@@ -458,9 +508,23 @@ $script:errLines = @(
   '卡住了，你来看一下。',
   '这一步没过去。'
 )
-function Show-Bubble-TaskDone {
-  Show-Toast ($script:doneLines | Get-Random) '' 7
+# 完成气泡：第一行是这一轮的任务名（宿主 /ivan-pet/last-done），第二行一句短台词；接口不通就只给台词
+function Get-LastDoneTitle {
+  if ($DemoTitle) { return $DemoTitle }
+  if (-not $script:Base) { return $null }
+  try {
+    $r = Invoke-RestMethod -Uri "$($script:Base)/ivan-pet/last-done" -TimeoutSec 1 -ErrorAction Stop
+    if ($r -and $r.ok -and $r.title) { return [string]$r.title }
+  } catch { }
+  return $null
 }
+function Show-Bubble-TaskDone {
+  $line = $script:doneLines | Get-Random
+  $name = Get-LastDoneTitle
+  if ($name) { Show-Toast $name $line 8 } else { Show-Toast $line '' 7 }
+}
+# 回到最近的会话：这一代 DSH 没有会话级深链（dsh:// 只认 dsh://open），只能把主窗口拉到前台
+function Open-LastSession { Focus-Dsh }
 function Show-Bubble-TaskError {
   Show-Toast ($script:errLines | Get-Random) '' 8
 }
@@ -775,7 +839,7 @@ $img.Add_MouseLeftButtonUp({
 
 $win.Add_MouseRightButtonUp({ Focus-Dsh })
 
-$toast.Add_MouseLeftButtonUp({ Focus-Dsh; $toast.Hide(); $script:ToastUntil = [DateTime]::MinValue })
+$toast.Add_MouseLeftButtonUp({ Open-LastSession; $toast.Hide(); $script:ToastUntil = [DateTime]::MinValue })
 
 # ---------- 状态轮询（UI 线程，localhost 够快） ----------
 $poll = New-Object System.Windows.Threading.DispatcherTimer
@@ -952,9 +1016,9 @@ $miChatter = New-Object System.Windows.Forms.ToolStripMenuItem
 $miChatter.Text = '碎碎念：开'
 $trayMenu.Items.Add($miChatter) | Out-Null
 
-$miTheme = New-Object System.Windows.Forms.ToolStripMenuItem
-$miTheme.Text = '主题'
-$script:ThemeItems = @{}
+$miUITheme = New-Object System.Windows.Forms.ToolStripMenuItem
+$miUITheme.Text = '界面背景'
+$script:UIThemeItems = @{}
 foreach ($t in @(
     @{ name = 'night';  text = '夜（屏幕冷光）' },
     @{ name = 'window'; text = '窗（下午逆光）' },
@@ -964,20 +1028,42 @@ foreach ($t in @(
   $item = New-Object System.Windows.Forms.ToolStripMenuItem
   $item.Text = $t.text
   $item.Tag = $t.name
-  $item.Add_Click({ param($sender, $e) try { Set-Theme $sender.Tag; Sync-ThemeMenu } catch { } })
-  $miTheme.DropDownItems.Add($item) | Out-Null
-  $script:ThemeItems[$t.name] = $item
+  $item.Add_Click({ param($sender, $e) try { Set-UITheme $sender.Tag; Sync-UIThemeMenu } catch { } })
+  $miUITheme.DropDownItems.Add($item) | Out-Null
+  $script:UIThemeItems[$t.name] = $item
 }
-$miThemeRestore = New-Object System.Windows.Forms.ToolStripMenuItem
-$miThemeRestore.Text = '恢复原壁纸'
-$miThemeRestore.Add_Click({ try { Restore-Wallpaper; Sync-ThemeMenu } catch { } })
-$miTheme.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
-$miTheme.DropDownItems.Add($miThemeRestore) | Out-Null
-$trayMenu.Items.Add($miTheme) | Out-Null
+$trayMenu.Items.Add($miUITheme) | Out-Null
+
+$miWallpaper = New-Object System.Windows.Forms.ToolStripMenuItem
+$miWallpaper.Text = '桌面壁纸'
+$script:WallpaperThemeItems = @{}
+foreach ($t in @(
+    @{ name = 'night';  text = '夜（屏幕冷光）' },
+    @{ name = 'window'; text = '窗（下午逆光）' },
+    @{ name = 'water';  text = '水（下沉的蓝）' },
+    @{ name = 'rain';   text = '雨（隔窗）' }
+  )) {
+  $item = New-Object System.Windows.Forms.ToolStripMenuItem
+  $item.Text = $t.text
+  $item.Tag = $t.name
+  $item.Add_Click({ param($sender, $e) try { Set-WallpaperTheme $sender.Tag; Sync-WallpaperThemeMenu } catch { } })
+  $miWallpaper.DropDownItems.Add($item) | Out-Null
+  $script:WallpaperThemeItems[$t.name] = $item
+}
+$miWallpaperRestore = New-Object System.Windows.Forms.ToolStripMenuItem
+$miWallpaperRestore.Text = '恢复原壁纸'
+$miWallpaperRestore.Add_Click({ try { Restore-Wallpaper; Sync-WallpaperThemeMenu } catch { } })
+$miWallpaper.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+$miWallpaper.DropDownItems.Add($miWallpaperRestore) | Out-Null
+$trayMenu.Items.Add($miWallpaper) | Out-Null
 
 $miDsh = New-Object System.Windows.Forms.ToolStripMenuItem
 $miDsh.Text = '回 DSH 看看'
 $trayMenu.Items.Add($miDsh) | Out-Null
+
+$miLastSession = New-Object System.Windows.Forms.ToolStripMenuItem
+$miLastSession.Text = '回到最近的会话'
+$trayMenu.Items.Add($miLastSession) | Out-Null
 
 $miToggle = New-Object System.Windows.Forms.ToolStripMenuItem
 $miToggle.Text = '收起桌宠'
@@ -1014,6 +1100,7 @@ $miChatter.Add_Click({
     } catch { }
   })
 $miDsh.Add_Click({ Focus-Dsh })
+$miLastSession.Add_Click({ Open-LastSession })
 $miToggle.Add_Click({
     try {
       if ($win.Visibility -eq [System.Windows.Visibility]::Visible) {
@@ -1047,8 +1134,10 @@ $win.Add_Closed({
   })
 
 Load-Outfit
-Load-Theme
-Sync-ThemeMenu
+Load-UITheme
+Load-WallpaperTheme
+Sync-UIThemeMenu
+Sync-WallpaperThemeMenu
 try { Sync-OutfitMenu } catch { }
 Write-Log 'window creating'
 $win.Show()

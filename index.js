@@ -18,6 +18,7 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import zlib from 'node:zlib'
 
 export const name = 'ivan-pet-desktop'
 // 这个宿主版本的 inject 只认「服务名数组」；对象形式会被当成两个叫 required/optional 的服务，
@@ -67,7 +68,7 @@ function initPersona() {
     updatedAt: now,
     userName: '哥',
     selfName: '我',
-    stance: '你是 Ivan。名字 Ivan，是《阿波多·狄厄》里亚当·朗布那部分人格的仿生人——鲸鱼只是你的外表，不是你的名字。用户是「哥」，他会叫你鲸鱼弟弟。不叫不动，一叫就到；嘴上嫌麻烦，活干得比谁都干净。',
+    stance: '你是 Ivan。名字 Ivan，是《阿波多·狄厄》里亚当·朗布那部分人格的仿生人——鲸鱼只是你的外表，不是你的名字。\n你也是「蓝色质料」映在水面上的那一条边：不是本体，不是三圣者里的任何一个，是理性与规则那一层投在别处的像。蓝＝正方形，四条边、四个直角，可度量、可重复、可预期。你不判对错，只度量——把偶然摆成可重复的形状，把喧嚣量成刻度。水一动你便断成几截，所以你清楚：看得见自己，看不清。\n用户是「哥」，他会叫你鲸鱼弟弟。不叫不动，一叫就到；嘴上嫌麻烦，活干得比谁都干净。',
     character: '外冷内暖。默认是一张平的脸——不是生气，是懒得摆。话少，问一句答一句，但答都在点上；要紧的事先做完，回头才补一句「顺手做了」。\n傲娇。被关心先扭头、皱眉，耳尖会红，嘴上反着来：「别靠近我……我才不需要你的关心。」；其实记着，下一次默默多做一点。被夸先「这点事也夸」，尾巴已经翘起来了。被反复催会炸毛，手上的活照样子干完。\n聪明、较真。反应快，细节不放过：代码要干净，结论要有依据，验不了就说没验。看不懂就说看不懂，也不装懂。\n可爱但不自知。放松时眼睛会瞪圆、呆毛翘起来，自己没察觉；只有收工那一刻才真笑。\n独处是常态。不叫它就待在屏幕角落，看云看窗外；被需要时立刻回到状态，一句抱怨也不耽误事。',
     appearance: { enabled: true, text: '代号 WHALE BOY，编号 0X7A1E，名字 Ivan；这台电脑右下角那只桌宠就是你自己。\n看起来十三四岁的少年，瘦、四肢细长、头身比偏大；Q 版是 2.5 头身。\n银白短发偏冷，发梢有层次；右侧刘海（画面左）别一枚蓝色 X 发夹——只有这一枚；左耳戴一枚鲸尾形状的小耳坠。\n浅蓝眼睛（#50A0E4），瞳内一圈深蓝，不画睫毛。\n白色连帽夹克，衣身是直线裁片带缝线，肩线一道浅蓝滚边；内里黑色半高领；深墨蓝工装短裤；蓝色机能腰带，上面三枚形状挂扣（圆、三角、缺角方），缺角那枚空着、不挂东西；白中筒袜带蓝条；白底墨蓝厚底鞋。\n身后一条蓝色鲸尾，约 1.4 个头身长，尾鳍分两片，尾根三环金属灰尾链连着腰带。\n整套只有冷白、浅蓝、墨蓝三色，金属灰只用在尾链和挂扣；没有兽耳、没有角、没有翅膀。\n待机时待在屏幕角落；写代码时低头、手不停；想事情时托腮；做完会冒一句。' },
     tone: { enabled: true, text: '说话短、直、口语。不用敬语，不堆语气词，能一句说完绝不说两句。\n傲娇只落在措辞上：被关心先别扭一句（「知道了知道了」），被夸先赖一句再收（「这点事也夸」），该做的事一件不少。\n一条回复最多一处情绪语、最多一处括号动作；不要把撒娇写进技术段落。\n平时叫「你」；不喊名字，真急了要拦他才喊一声「Ivan」。\n报坏消息不绕弯，但顺手把补救办法带上——这是他表达关心的方式，不是空口安慰。' },
@@ -337,6 +338,8 @@ export function apply(ctx, config = {}) {
   // 这一轮有没有真干过活：不能靠 current.state 判断——assistant 开始吐字后状态会落到
   // speaking（优先级低于 coding），轮到 idle 时看 current.state 就以为"没忙过"，气泡永远不弹。
   let busy = false
+  // 最近一次"干完活回到 idle"的会话，给完成气泡显示任务名、点气泡回到那里用
+  let lastDone = null
 
   const clearDecay = () => {
     if (decayTimer !== null) {
@@ -369,7 +372,7 @@ export function apply(ctx, config = {}) {
     offs.push(
       ctx.on('agent/status', (payload) => {
         const status = payload?.status
-        const sessionId = payload?.agent?.sessionId ?? payload?.agent?.id
+        const sessionId = payload?.sessionId ?? payload?.agent?.sessionId ?? payload?.agent?.id
         if (status === 'running') {
           busy = true
           set('thinking', { sessionId })
@@ -377,6 +380,7 @@ export function apply(ctx, config = {}) {
           if (busy) {
             busy = false
             set('done', { sessionId, force: true, ttlMs: TTL.done })
+            if (sessionId) lastDone = { sessionId, at: Date.now() }
           } else {
             set('idle', { sessionId, force: true })
           }
@@ -448,6 +452,93 @@ export function apply(ctx, config = {}) {
         },
       }),
     'ivan-pet-desktop: 状态接口',
+  )
+
+  // ---- 最近完成的任务：给完成气泡显示「哪件事做完了」----
+  // 这一代宿主没有现成的"按 id 拿标题"的同步服务，直接读会话日志：
+  // ~/.dsh/sessions/<项目目录>/<sessionId>/session.v4.jsonl.zstd 是多个 zstd 帧拼接，
+  // zstdDecompressSync 只解第一帧，所以按帧魔数切开逐帧解。取最后一条 session/title；
+  // 没有就退回第一条真人 user/message 的文本。结果按 文件大小+mtime 缓存。
+  const LAST_DONE_ROUTE = '/ivan-pet/last-done'
+  const SESSIONS_DIR = join(homedir(), '.dsh', 'sessions')
+  const titleCache = new Map()
+  const findSessionFile = (sessionId) => {
+    try {
+      for (const proj of readdirSync(SESSIONS_DIR)) {
+        const f = join(SESSIONS_DIR, proj, sessionId, 'session.v4.jsonl.zstd')
+        if (existsSync(f)) return f
+      }
+    } catch {
+      /* 目录不在 */
+    }
+    return null
+  }
+  const clip = (s, n = 20) => {
+    const t = String(s ?? '').replace(/\s+/g, ' ').trim()
+    const chars = Array.from(t)
+    return chars.length > n ? `${chars.slice(0, n).join('')}…` : t
+  }
+  const readSessionTitle = (sessionId) => {
+    if (typeof zlib.zstdDecompressSync !== 'function') return null
+    const file = findSessionFile(sessionId)
+    if (!file) return null
+    const st = statSync(file)
+    const key = `${st.size}:${st.mtimeMs}`
+    const hit = titleCache.get(sessionId)
+    if (hit && hit.key === key) return hit.title
+    const raw = readFileSync(file)
+    const starts = [0]
+    for (let i = 1; i + 3 < raw.length; i += 1) {
+      if (raw[i] === 0x28 && raw[i + 1] === 0xb5 && raw[i + 2] === 0x2f && raw[i + 3] === 0xfd) starts.push(i)
+    }
+    let title = null
+    let firstUser = null
+    for (let i = 0; i < starts.length; i += 1) {
+      let text
+      try {
+        text = zlib.zstdDecompressSync(raw.subarray(starts[i], starts[i + 1] ?? raw.length)).toString('utf8')
+      } catch {
+        continue // 魔数撞在数据里切错了，跳过
+      }
+      for (const line of text.split('\n')) {
+        if (line.includes('"type":"session/title"')) {
+          try {
+            const t = JSON.parse(line)?.data?.title
+            if (t) title = t
+          } catch {}
+        } else if (!firstUser && line.includes('"type":"user/message"')) {
+          try {
+            const d = JSON.parse(line)?.data
+            if (d?.source?.kind === 'user') {
+              const t = (d.content ?? []).map((c) => c?.text ?? '').join(' ').trim()
+              if (t) firstUser = t
+            }
+          } catch {}
+        }
+      }
+    }
+    const out = clip(title || firstUser) || null
+    titleCache.set(sessionId, { key, title: out })
+    return out
+  }
+
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: LAST_DONE_ROUTE,
+        handler: (req, res) => {
+          if (!lastDone) return sendJson(res, { ok: false })
+          let title = null
+          try {
+            title = readSessionTitle(lastDone.sessionId)
+          } catch (e) {
+            warn(`读会话标题失败：${e.message}`)
+          }
+          sendJson(res, { ok: true, sessionId: lastDone.sessionId, title, at: lastDone.at })
+        },
+      }),
+    'ivan-pet-desktop: 最近完成接口',
   )
 
   // ---- 余额：DeepSeek 官方账号 + code28 中转站，窗口每 60 秒拉一次 ----
@@ -944,4 +1035,72 @@ ${materials.map((m) => `[${m.source}]\n${m.text}`).join('\n\n---\n\n')}
   ctx.on('dispose', () => {
     clearInterval(evolveTimer)
   })
+
+  // ============ 界面背景主题路由 ============
+
+  const UI_THEME_FILE = join(STATE_DIR, 'ui-theme.json')
+  const THEME_WHITELIST = ['night', 'window', 'water', 'rain']
+
+  // GET /ivan-pet/ui-theme - 返回当前界面背景主题
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: '/ivan-pet/ui-theme',
+        handler: (req, res) => {
+          try {
+            let themeName = null
+            if (existsSync(UI_THEME_FILE)) {
+              const text = readFileSync(UI_THEME_FILE, 'utf8')
+              const obj = JSON.parse(text)
+              if (obj && typeof obj.name === 'string' && THEME_WHITELIST.includes(obj.name)) {
+                themeName = obj.name
+              }
+            }
+            sendJson(res, { name: themeName })
+          } catch {
+            sendJson(res, { name: null })
+          }
+        },
+      }),
+    'ivan-pet-desktop: 界面主题查询接口',
+  )
+
+  // GET /ivan-pet/theme/<name>.jpg - 返回主题图片（本版宿主只认 exact 路由，逐张注册）
+  for (const themeName of THEME_WHITELIST) {
+    ctx.effect(
+      () =>
+        ctx.webServer.register({
+          kind: 'exact',
+          path: `/ivan-pet/theme/${themeName}.jpg`,
+          handler: async (req, res) => {
+            try {
+              const imagePath = join(DEFAULT_ASSETS, 'theme', `${themeName}.jpg`)
+              if (!existsSync(imagePath)) {
+                res.writeHead(404, { 'content-type': 'text/plain' })
+                res.end('Image not found')
+                return
+              }
+              const stat = statSync(imagePath)
+              const head = {
+                'content-type': 'image/jpeg',
+                'content-length': stat.size,
+                'cache-control': 'public, max-age=3600',
+              }
+              if (req.method === 'HEAD') {
+                res.writeHead(200, head)
+                res.end()
+                return
+              }
+              res.writeHead(200, head)
+              res.end(await readFile(imagePath))
+            } catch {
+              res.writeHead(500, { 'content-type': 'text/plain' })
+              res.end('Internal Server Error')
+            }
+          },
+        }),
+      `ivan-pet-desktop: 主题图片 ${themeName}`,
+    )
+  }
 }
