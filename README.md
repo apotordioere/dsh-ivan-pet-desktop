@@ -36,28 +36,27 @@ plugin_manager install_bundle  target: "link:D:\\path\\to\\dsh-ivan-pet-desktop"
 
 ## 待机动作
 
-默认那套衣服下，闲着的时候每 35–90 秒会自己做一个动作，每次 2.6–3.6 秒：
+默认那套衣服下，闲着的时候每约 28–73 秒会自己做一个动作，每次 2.6–3.6 秒；基础站立还会做上下呼吸、轻摆和微倾斜：
 
 - `pose_stretch` 伸懒腰（闭眼、张嘴）
 - `pose_wave` 抬手打招呼
 - `pose_lookback` 侧身回头看
 - `pose_play_tail` 两手抓着鲸尾看
 
-与随机表情互斥：正在做动作时不出表情，正在出表情时不触发动作；有气泡在显示时也不做动作，免得脸被挡住。其它七套衣服没有动作帧，走回落链显示该套的 `idle`。
+与随机表情互斥：正在做动作时不出表情，正在出表情时不触发动作；眨眼只在两者都结束后触发；有气泡在显示时也不做动作，免得脸被挡住。
 
 ## 换衣服 / 表情
 
 - **碎碎念**：闲下来的时候他会自己嘟囔一句（挂在头顶的气泡，5 秒消失）。台词十六句，`{u}` 会换成人设文件里的 `userName`（默认「哥」），改完人设下一步生效、不用重启桌宠。平时 75–195 秒一句，只在 idle / speaking 且没有别的话在显示时才说；余额低于阈值时会换成催钱的三句。托盘右键「让他说句话」立刻来一句，「碎碎念：开/关」可以整个关掉
 - **换衣服**：右键托盘图标 →「换衣服」→ 日常（默认）/ 睡衣 / 冬装 / 学院 / 水手 / 浴衣 / 街头 / 西装，八套。当前选择存在 `%APPDATA%\ivan-pet\outfit.json`，下次启动沿用。
-  - 每套衣服都是完整的 7 帧（idle / blink / thinking / coding / done / error / pat），放在 `pet/assets/outfits/<套名>/`；
-  - 缺某帧时先回落到同套的 `idle`，再回落到默认套，不会出现半套衣服。
+  - 日常（默认）、睡衣、冬装、学院、水手、浴衣、街头、西装现在都有完整 7 帧（idle / blink / thinking / coding / done / error / pat），放在 `pet/assets/outfits/<套名>/`；动作帧均以对应服装的 idle 作为参考生成，不会串回白色默认夹克。
+  - 缺某帧时先回落到同套的 `idle`，只有整套目录缺失才回落到默认套。
 - **表情**：日常（默认）状态下，闲着的时候会随机换成笑 / 困 / 害羞三种表情（`expr_laugh.png` / `expr_sleepy.png` / `expr_shy.png`，另有 `expr_angry.png`），亮 1.9 秒后回到站姿，间隔 18–50 秒。
-  - 前后加的五套（学院 / 水手 / 浴衣 / 街头 / 西装）只做了 `idle` 一帧，其余状态按上面的回落链吃默认套的帧，所以动作不会断。
-  - 表情图与待机动作只做了默认那套，所以穿别的衣服时不会冒表情/动作，避免衣服串掉。
+  - 表情图与待机动作（pose_*）仍是默认套专属；其它服装会使用自身 7 帧完成状态反馈，待机姿势则使用程序化轻摆/倾斜，不会拿默认服装姿势图冒充。
 
 ## 主题（桌面壁纸）
 
-右键托盘图标 →「主题」→ 夜 / 窗 / 水 / 雨，一键把桌面壁纸换成他的特写；「恢复原壁纸」换回你原来那张。
+右键托盘图标 →「桌面壁纸」→ 夜 / 窗 / 水 / 雨，一键把桌面壁纸换成他的特写；「恢复原壁纸」换回你原来那张。另有「界面背景」子菜单，选择后刷新 DSH（F5）生效。
 
 - 四张壁纸在 `pet/assets/theme/`（2560×1600，深蓝渐变 + 人物右侧羽化，不挡桌面图标）；同目录的 `portrait_*.jpg` 是 1080×1620 竖版原图，留给别的用途
 - 选择记在 `%APPDATA%\ivan-pet-desktop\theme.json`，下次启动会静默套回；第一次切换前会把当前壁纸路径存进 `previous`，所以「恢复原壁纸」永远有得退
@@ -89,12 +88,12 @@ idle.png  blink.png  thinking.png  coding.png  done.png  error.png  pat.png  iva
 DSH 宿主 ──apply()──> spawn powershell.exe -File pet/pet.ps1 -Assets pet/assets
                               │
                               ├─ WPF 透明置顶窗（DispatcherTimer 轮询 /ivan-pet/state）
-                              ├─ 拖拽计时器（15ms，读 Cursor.Position，按 DPI 换算成 DIP）
+                              ├─ 拖拽线程（8ms，Win32 SetWindowPos，读 Cursor.Position）
                               ├─ NotifyIcon 托盘图标 + 右键菜单
                               └─ 插件停用 ── dispose() ──> child.kill()
 ```
 
-开始前会读 `%APPDATA%\ivan-pet-desktop\pet.pid`，把上次遗留的进程收掉，避免两只叠在一起。
+启动时会用独占锁登记真实桌宠 PID；宿主读到存活 PID 就复用，死 PID 才清理，避免重连时窗口闪退或两只叠在一起。
 
 ## 踩过的坑（改这个插件前先看）
 

@@ -6,7 +6,7 @@
  * 一个无边框、透明、置顶的窗口，跟着 DSH 会话状态换动作、任务完成弹提示条。
  *
  * 插件生命周期 = 进程生命周期：
- *   apply()  启动（先清掉上次遗留的实例）
+ *   apply()  启动（存活 PID 复用，死 PID 清理后再启动）
  *   dispose  结束进程，不留孤儿窗口
  *
  * 状态从哪来：窗口自己轮询 `http://127.0.0.1:<DSH 端口>/ivan-pet/state`
@@ -38,6 +38,10 @@ const OLD_PERSONA = join(homedir(), '.dsh', 'whale-persona', 'config.json')
 const PRIORITY = { idle: 0, pat: 1, speaking: 2, thinking: 3, coding: 4, done: 5, error: 6 }
 const TTL = { pat: 1200, done: 2600, error: 5000 }
 
+// 模块级spawn锁：防止多个 Harness worker 并发 apply() 时重复 spawn
+let spawnInProgress = false
+let spawnLockTimer = null
+
 // ============ 人设存储与渲染 ============
 
 /** 人设缓存：mtime+size 做 key，避免反复解析 */
@@ -46,13 +50,16 @@ let personaCache = { key: '', data: null }
 /** 读人设文件，带缓存 */
 function loadPersona() {
   try {
-    const st = existsSync(PERSONA_FILE) ? readFileSync(PERSONA_FILE, 'utf8') : null
-    if (!st) return initPersona()
-    
-    const key = `${PERSONA_FILE}:${st.length}`
+    if (!existsSync(PERSONA_FILE)) return initPersona()
+    const text = readFileSync(PERSONA_FILE, 'utf8')
+    if (!text) return initPersona()
+
+    // mtime+size 作为缓存 key；同长度的手工修改也必须触发重新解析。
+    const st = statSync(PERSONA_FILE)
+    const key = `${PERSONA_FILE}:${st.mtimeMs}:${st.size}`
     if (personaCache.key === key && personaCache.data) return personaCache.data
-    
-    const data = JSON.parse(st)
+
+    const data = JSON.parse(text)
     personaCache = { key, data }
     return data
   } catch {
@@ -116,7 +123,12 @@ function initPersona() {
   try {
     mkdirSync(STATE_DIR, { recursive: true })
     writeFileSync(PERSONA_FILE, JSON.stringify(base, null, 2), 'utf8')
-    personaCache = { key: `${PERSONA_FILE}:${JSON.stringify(base).length}`, data: base }
+    try {
+      const st = statSync(PERSONA_FILE)
+      personaCache = { key: `${PERSONA_FILE}:${st.mtimeMs}:${st.size}`, data: base }
+    } catch {
+      personaCache = { key: '', data: base }
+    }
   } catch {
     // 写不进也能用内存版
   }
@@ -159,13 +171,21 @@ function renderPersona(persona) {
   return parts.join('\n\n')
 }
 
+// aliveSync: 用 spawnSync 调 tasklist 检查 pid 是否存在。
+// process.kill(pid, 0) 在 Electron renderer/worker 进程里不可靠（只能查自己进程组），
+// process.kill(pid, 0) 只是存在性探测，不发信号：
+//   - ESRCH  → 进程不存在 → 返回 false
+//   - EPERM  → 进程存在但无权 → 返回 true（Electron worker 里跨进程树常见）
+//   - 成功   → 进程存在      → 返回 true
+// 比 spawnSync+tasklist 更可靠：spawnSync 在 Electron 沙箱里因 stdio:pipe 触发 EPERM。
 function alive(pid) {
   if (!pid || pid <= 0) return false
   try {
     process.kill(pid, 0)
-    return true
-  } catch {
-    return false
+    return true          // 成功说明进程存在且可见
+  } catch (e) {
+    // ESRCH = no such process；EPERM = exists but no permission → still alive
+    return e.code === 'EPERM'
   }
 }
 
@@ -174,6 +194,26 @@ function killPid(pid) {
     process.kill(pid)
   } catch {
     /* 已经没了 */
+  }
+}
+
+function readPidFile() {
+  try {
+    const pid = Number.parseInt(readFileSync(PID_FILE, 'utf8').trim(), 10)
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : 0
+  } catch {
+    return 0
+  }
+}
+
+/** 只在 pid 文件仍指向本次实例时删除，避免覆盖/误删新实例的握手。 */
+function clearPidFileIf(pid) {
+  if (!pid || readPidFile() !== pid) return false
+  try {
+    unlinkSync(PID_FILE)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -206,34 +246,62 @@ export function apply(ctx, config = {}) {
   const extra = Array.isArray(config.extraArgs) ? config.extraArgs.map(String) : []
 
   ctx.effect(() => {
-    // 1. 收掉上一次遗留的实例（宿主崩溃/强退都会留下进程）
-    try {
-      const old = Number.parseInt(readFileSync(PID_FILE, 'utf8').trim(), 10)
-      if (alive(old)) {
-        log(`结束上次遗留的桌宠进程 pid=${old}`)
-        killPid(old)
-      }
-    } catch {
-      /* 没有 pid 文件 */
-    }
-
-    // 2. 拉起窗口
-    // 端口每次宿主重启都可能变，窗口靠进程名找端口并不可靠（实测找不到：HTTP 服务不在
-    // "DeepSeek Harness" 进程名下），所以这里把 webServer 自己报的 origin 直接交给它。
+    // 更新 base.txt，让已有窗口在宿主重启后能重连新端口
     let origin = ''
     try {
       origin = ctx.get('webServer')?.getOrigin?.() ?? ''
-    } catch {
-      /* 没 listen 完就没有 origin，窗口会退回自己找 */
-    }
+    } catch { /* 没 listen 完就没有 origin */ }
     if (origin) {
       try {
         mkdirSync(STATE_DIR, { recursive: true })
         writeFileSync(BASE_FILE, origin, 'utf8')
-      } catch {
-        /* 写不进也能靠 -Base 参数 */
+      } catch { /* 写不进也能靠 -Base 参数 */ }
+    }
+
+    // 1. 检查是否已有存活的桌宠进程——存活则复用，不杀不 spawn
+    //    （DSH port 变化时 ctx.effect 会重跑，不应每次都重启窗口导致它消失一瞬）
+    let existingPid = 0
+    try {
+      existingPid = Number.parseInt(readFileSync(PID_FILE, 'utf8').trim(), 10)
+    } catch { /* 没有 pid 文件 */ }
+
+    if (existingPid > 0 && alive(existingPid)) {
+      log(`复用现有桌宠进程 pid=${existingPid}，仅更新 base.txt`)
+      return () => {
+        // 只在 pid 文件仍指向这个进程时收掉它，避免误杀后来实例；文件也只条件清理。
+        if (readPidFile() === existingPid) killPid(existingPid)
+        clearPidFileIf(existingPid)
+        try { unlinkSync(BASE_FILE) } catch { /* ignore */ }
+        log('桌宠窗口已关闭（复用路径）')
       }
     }
+
+    // 2. 没有存活进程
+    if (existingPid > 0) {
+      log(`上次遗留进程 pid=${existingPid} 已不存在，清理 pid 文件`)
+      clearPidFileIf(existingPid)
+    }
+
+    // 模块级并发保护：Harness 多 worker 并发 apply() 时，第一个 spawn，后面的等待后复用。
+    // pet.ps1 会在拿到独占锁后写入 PID_FILE；这里不能提前写 child.pid 覆盖它。
+    if (spawnInProgress) {
+      log('另一个 worker 正在 spawn，等待 1.5s 后复用')
+      let disposed = false
+      const timer = setTimeout(() => {
+        if (disposed) return
+        const pid = readPidFile()
+        if (pid > 0 && alive(pid)) log(`等待后确认 pid=${pid} 已启动`)
+      }, 1500)
+      return () => { disposed = true; clearTimeout(timer) }
+    }
+
+    spawnInProgress = true
+    if (spawnLockTimer) clearTimeout(spawnLockTimer)
+    // 3 秒后自动释放锁（防止脚本启动失败时永久锁住）。
+    spawnLockTimer = setTimeout(() => {
+      spawnInProgress = false
+      spawnLockTimer = null
+    }, 3000)
 
     const args = [
       '-NoProfile',
@@ -250,35 +318,31 @@ export function apply(ctx, config = {}) {
       windowsHide: true,
       detached: false,
     })
+    const childPid = child.pid || 0
 
-    child.on('error', (err) => warn(`启动失败：${err.message}`))
+    child.on('error', (err) => {
+      spawnInProgress = false
+      warn(`启动失败：${err.message}`)
+    })
     child.on('exit', (code) => {
+      spawnInProgress = false
+      if (spawnLockTimer) {
+        clearTimeout(spawnLockTimer)
+        spawnLockTimer = null
+      }
+      // 只清理 PowerShell 自己通过握手写入的 PID；不碰其他实例的文件。
+      clearPidFileIf(childPid)
       if (code !== 0 && code !== null) warn(`窗口进程退出，code=${code}`)
     })
 
-    if (child.pid) {
-      try {
-        mkdirSync(STATE_DIR, { recursive: true })
-        writeFileSync(PID_FILE, String(child.pid), 'utf8')
-      } catch {
-        /* 写不进就不写，不影响窗口 */
-      }
-      log(`桌宠窗口已启动 pid=${child.pid} assets=${assets}`)
-    }
+    // PID_FILE 由 pet.ps1 在成功取得单实例锁后写入，不能在 spawn 后写 child.pid。
+    if (childPid) log(`桌宠启动请求已发送 pid=${childPid} assets=${assets}`)
 
-    // 3. 插件被停用/宿主关闭时收进程
+    // 4. 插件被停用/宿主关闭时收进程
     return () => {
       if (!child.killed) child.kill()
-      try {
-        unlinkSync(PID_FILE)
-      } catch {
-        /* ignore */
-      }
-      try {
-        unlinkSync(BASE_FILE)
-      } catch {
-        /* ignore */
-      }
+      clearPidFileIf(childPid)
+      try { unlinkSync(BASE_FILE) } catch { /* ignore */ }
       log('桌宠窗口已关闭')
     }
   }, 'ivan-pet-desktop: 拉起桌面窗口')
@@ -997,7 +1061,12 @@ ${materials.map((m) => `[${m.source}]\n${m.text}`).join('\n\n---\n\n')}
       } catch {}
       
       // 刷新缓存
-      personaCache = { key: `${PERSONA_FILE}:${JSON.stringify(persona).length}`, data: persona }
+      try {
+        const st = statSync(PERSONA_FILE)
+        personaCache = { key: `${PERSONA_FILE}:${st.mtimeMs}:${st.size}`, data: persona }
+      } catch {
+        personaCache = { key: '', data: persona }
+      }
       
       evolving = false
       return { ok: true, added: newTraits.map((t) => t.text), note: result.note }

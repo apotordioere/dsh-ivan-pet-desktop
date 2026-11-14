@@ -11,6 +11,32 @@
 # 桌面常驻版 Ivan：独立置顶透明窗口，DSH 最小化也看得见；轮询宿主状态换动作；任务完成弹提示。
 $ErrorActionPreference = 'Stop'
 
+# ── 单实例守卫 ──────────────────────────────────────────────────────────────
+# 必须在 Add-Type 加载大程序集（3-5 秒）之前！否则并发进程都能越过这段。
+# 策略：独占式打开同一个锁文件；第二个进程打不开就立刻退出（仅更新 base.txt）。
+$script:_lockPath = Join-Path $env:APPDATA 'ivan-pet-desktop\pet.lock'
+New-Item -ItemType Directory -Force -Path (Split-Path $script:_lockPath) | Out-Null
+try {
+    $script:_lockStream = [IO.File]::Open(
+        $script:_lockPath,
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None)
+} catch {
+    # 锁被另一个实例持有 → 仅写 base.txt 让窗口重连，然后退出
+    $baseFile = Join-Path $env:APPDATA 'ivan-pet-desktop\base.txt'
+    if ($Base) {
+        try { [IO.File]::WriteAllText($baseFile, $Base.TrimEnd('/'), [Text.Encoding]::UTF8) } catch {}
+    }
+    exit 0
+}
+# 锁拿到后才登记真实桌宠 PID，避免宿主把“启动器 powershell”误写进共享 pid 文件。
+$script:_pidPath = Join-Path $env:APPDATA 'ivan-pet-desktop\pet.pid'
+try {
+    [IO.File]::WriteAllText($script:_pidPath, [string]$PID, [Text.Encoding]::UTF8)
+} catch { }
+# ─────────────────────────────────────────────────────────────────────────────
+
 # 按物理像素工作：150% 缩放屏上也不糊，坐标与实际屏幕一致
 try {
   Add-Type @"
@@ -44,6 +70,12 @@ $script:NextExpr = [DateTime]::Now.AddSeconds(10)
 $script:PoseUntil = [DateTime]::MinValue
 $script:PoseName = 'stretch'
 $script:NextPose = [DateTime]::Now.AddSeconds(25)
+$script:MotionKey = ''
+$script:MotionGeneration = 0
+$script:CurrentFrame = 'idle'
+$script:SpecialKind = ''
+$script:SpecialUntil = [DateTime]::MinValue
+$script:SpecialStarted = $false
 $script:LatestState = 'idle'
 $script:ToastUntil = [DateTime]::MinValue
 $script:PosFile = Join-Path $env:APPDATA 'ivan-pet\pos.json'
@@ -113,8 +145,10 @@ $img.RenderTransformOrigin = New-Object System.Windows.Point(0.5, 1)
 
 $scale = New-Object System.Windows.Media.ScaleTransform(1, 1)
 $move = New-Object System.Windows.Media.TranslateTransform(0, 0)
+$tilt = New-Object System.Windows.Media.RotateTransform(0)
 $tg = New-Object System.Windows.Media.TransformGroup
 $tg.Children.Add($scale) | Out-Null
+$tg.Children.Add($tilt) | Out-Null
 $tg.Children.Add($move) | Out-Null
 $img.RenderTransform = $tg
 
@@ -171,19 +205,40 @@ $win.Add_MouseWheel({
 
 # ---------- 贴图 ----------
 $script:Cache = @{}
+# 特殊动作没有专属 PNG 时，先在同一套衣服里找最接近的基础动作，绝不把默认衣服贴到其它服装上。
+$script:OutfitActionAliases = @{
+  pajama = @{ pose_stretch = 'thinking'; pose_wave = 'pat'; pose_lookback = 'thinking'; pose_play_tail = 'pat'; expr_laugh = 'done'; expr_shy = 'thinking'; expr_sleepy = 'idle' }
+  winter = @{ pose_stretch = 'thinking'; pose_wave = 'pat'; pose_lookback = 'thinking'; pose_play_tail = 'pat'; expr_laugh = 'done'; expr_shy = 'thinking'; expr_sleepy = 'idle' }
+  sailor = @{ pose_stretch = 'idle'; pose_wave = 'idle'; pose_lookback = 'idle'; pose_play_tail = 'idle'; expr_laugh = 'idle'; expr_shy = 'idle'; expr_sleepy = 'idle' }
+  yukata = @{ pose_stretch = 'idle'; pose_wave = 'idle'; pose_lookback = 'idle'; pose_play_tail = 'idle'; expr_laugh = 'idle'; expr_shy = 'idle'; expr_sleepy = 'idle' }
+  street = @{ pose_stretch = 'idle'; pose_wave = 'idle'; pose_lookback = 'idle'; pose_play_tail = 'idle'; expr_laugh = 'idle'; expr_shy = 'idle'; expr_sleepy = 'idle' }
+  suit = @{ pose_stretch = 'idle'; pose_wave = 'idle'; pose_lookback = 'idle'; pose_play_tail = 'idle'; expr_laugh = 'idle'; expr_shy = 'idle'; expr_sleepy = 'idle' }
+  uniform = @{ pose_stretch = 'idle'; pose_wave = 'idle'; pose_lookback = 'idle'; pose_play_tail = 'idle'; expr_laugh = 'idle'; expr_shy = 'idle'; expr_sleepy = 'idle' }
+}
+function Get-ActionAlias([string]$name) {
+  try {
+    if ($script:OutfitActionAliases.ContainsKey($script:Outfit) -and $script:OutfitActionAliases[$script:Outfit].ContainsKey($name)) {
+      return [string]$script:OutfitActionAliases[$script:Outfit][$name]
+    }
+  } catch { }
+  return $name
+}
 function Get-Sprite([string]$name) {
   $key = "$($script:Outfit)/$name"
   if (-not $script:Cache.ContainsKey($key)) {
+    $path = $null
     if ($script:Outfit -eq 'default') {
       $path = Join-Path $script:Assets "$name.png"
     } else {
-      $path = Join-Path $script:Assets (Join-Path 'outfits' (Join-Path $script:Outfit "$name.png"))
-    }
-    if (-not (Test-Path $path)) { $path = Join-Path $script:Assets "$name.png" }
-    if (-not (Test-Path $path)) {
-      if ($script:Outfit -ne 'default') {
-        $path = Join-Path $script:Assets (Join-Path 'outfits' (Join-Path $script:Outfit 'idle.png'))
+      $outfitDir = Join-Path $script:Assets (Join-Path 'outfits' $script:Outfit)
+      $path = Join-Path $outfitDir "$name.png"
+      if (-not (Test-Path $path)) {
+        $alias = Get-ActionAlias $name
+        if ($alias -ne $name) { $path = Join-Path $outfitDir "$alias.png" }
       }
+      # 普通状态优先回落到该服装自己的 idle，保持衣服一致；只有缺整套服装时才用默认 idle。
+      if (-not (Test-Path $path)) { $path = Join-Path $outfitDir 'idle.png' }
+      if (-not (Test-Path $path)) { $path = Join-Path $script:Assets "$name.png" }
     }
     if (-not (Test-Path $path)) { $path = Join-Path $script:Assets 'idle.png' }
     $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
@@ -208,9 +263,14 @@ function Save-Outfit {
 
 function Set-Outfit([string]$name) {
   if (-not $name) { $name = 'default' }
+  $allowed = @('default','pajama','winter','uniform','sailor','yukata','street','suit')
+  if ($allowed -notcontains $name) {
+    Write-Log "unknown outfit '$name', fallback=default"
+    $name = 'default'
+  }
   $script:Outfit = $name
   $script:Cache = @{}
-  try { Set-Frame $script:LatestState } catch { }
+  try { Set-Frame $script:CurrentFrame } catch { try { Set-Frame $script:LatestState } catch { } }
   Save-Outfit
   Write-Log "outfit=$name"
 }
@@ -350,6 +410,8 @@ function Load-Outfit {
       $obj = Get-Content $script:OutfitFile -Raw | ConvertFrom-Json
       if ($obj.name) { $script:Outfit = [string]$obj.name }
     }
+    $allowed = @('default','pajama','winter','uniform','sailor','yukata','street','suit')
+    if ($allowed -notcontains $script:Outfit) { $script:Outfit = 'default' }
     Write-Log "outfit loaded: $($script:Outfit)"
   } catch {
     Write-Log "outfit load failed: $($_.Exception.Message)"
@@ -357,12 +419,19 @@ function Load-Outfit {
 }
 
 function Set-Frame([string]$name) {
+  if (-not $name) { $name = 'idle' }
+  $script:CurrentFrame = $name
   $s = Get-Sprite $name
   if (-not [object]::ReferenceEquals($img.Source, $s)) { $img.Source = $s }
 }
 
 # ---------- 动画 ----------
-function Start-Breathe {
+function Start-Breathe([switch]$KeepKey) {
+  $script:MotionGeneration++
+  $script:SpecialKind = ''
+  $script:SpecialUntil = [DateTime]::MinValue
+  $script:SpecialStarted = $false
+  if (-not $KeepKey) { $script:MotionKey = 'base' }
   $breathe = New-Object System.Windows.Media.Animation.DoubleAnimation
   $breathe.From = 0
   $breathe.To = -4
@@ -371,10 +440,79 @@ function Start-Breathe {
   $breathe.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
   $breathe.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
   $move.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $breathe)
+  $sway = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $sway.From = -1.6
+  $sway.To = 1.6
+  $sway.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(3.8))
+  $sway.AutoReverse = $true
+  $sway.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $sway.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $move.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $sway)
+  $rock = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $rock.From = -1.1
+  $rock.To = 1.1
+  $rock.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(4.8))
+  $rock.AutoReverse = $true
+  $rock.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $rock.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $tilt.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $rock)
+  # 很轻的缩放呼吸：让站立帧不是一张静态纸片
+  $sx = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $sx.From = 0.996; $sx.To = 1.004
+  $sx.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(3.2))
+  $sx.AutoReverse = $true
+  $sx.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $sx.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $sx)
+  $sy = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $sy.From = 1.0; $sy.To = 1.008
+  $sy.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(3.2))
+  $sy.AutoReverse = $true
+  $sy.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $sy.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $sy)
+}
+
+function Start-ActionMotion([string]$name) {
+  if (-not $name) { $name = 'idle' }
+  if ($script:MotionKey -eq $name) { return }
+  $script:MotionKey = $name
+  if ($name -eq 'idle' -or $name -eq 'speaking' -or $name -eq 'coding' -or $name -eq 'thinking' -or $name -eq 'done' -or $name -eq 'error' -or $name -eq 'pat' -or $name -eq 'blink') {
+    Start-Breathe -KeepKey
+    return
+  }
+  $xTo = 0.0; $angleTo = 0.0; $dur = 0.9
+  switch -Regex ($name) {
+    'pose_wave'      { $xTo = 4.0;  $angleTo = 2.6; $dur = 0.55; break }
+    'pose_play_tail' { $xTo = -3.0; $angleTo = -2.2; $dur = 0.7; break }
+    'pose_lookback'  { $xTo = 2.0;  $angleTo = 4.0; $dur = 0.8; break }
+    'pose_stretch'   { $xTo = 0.0;  $angleTo = -1.8; $dur = 1.0; break }
+    'expr_laugh'     { $xTo = 1.5;  $angleTo = 1.5; $dur = 0.45; break }
+    'expr_shy'       { $xTo = -1.2; $angleTo = -2.0; $dur = 0.8; break }
+    'expr_sleepy'    { $xTo = 0.5;  $angleTo = -3.0; $dur = 1.2; break }
+    default          { Start-Breathe -KeepKey; return }
+  }
+  $sway = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $sway.From = -$xTo; $sway.To = $xTo
+  $sway.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds($dur))
+  $sway.AutoReverse = $true
+  $sway.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $sway.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $move.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $sway)
+  $rock = New-Object System.Windows.Media.Animation.DoubleAnimation
+  $rock.From = -$angleTo; $rock.To = $angleTo
+  $rock.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds($dur * 1.35))
+  $rock.AutoReverse = $true
+  $rock.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+  $rock.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+  $tilt.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $rock)
 }
 Start-Breathe
 
 function Hop {
+  $script:SpecialKind = 'hop'
+  $script:SpecialUntil = [DateTime]::Now.AddMilliseconds(420)
+  $script:SpecialStarted = $true
   $y = New-Object System.Windows.Media.Animation.DoubleAnimation
   $y.From = 0; $y.To = -20
   $y.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds(200))
@@ -384,6 +522,9 @@ function Hop {
 }
 
 function Squash {
+  $script:SpecialKind = 'squash'
+  $script:SpecialUntil = [DateTime]::Now.AddMilliseconds(280)
+  $script:SpecialStarted = $true
   $sx = New-Object System.Windows.Media.Animation.DoubleAnimation
   $sx.From = 1; $sx.To = 1.06
   $sx.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds(130))
@@ -396,6 +537,24 @@ function Squash {
   $sy.AutoReverse = $true
   $sy.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
   $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $sy)
+}
+
+function Shake {
+  # 出错时给一个短促的左右晃动，比静态红气泡更有反馈
+  $script:SpecialKind = 'shake'
+  $script:SpecialUntil = [DateTime]::Now.AddMilliseconds(380)
+  $script:SpecialStarted = $true
+  $j = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+  $j.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromMilliseconds(360))
+  $j.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
+  foreach ($pair in @(@(-2,0), @(2,60), @(-2,120), @(2,180), @(0,360))) {
+    $kf = New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame
+    $kf.Value = [double]$pair[0]
+    $kf.KeyTime = [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds([double]$pair[1]))
+    $kf.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+    [void]$j.KeyFrames.Add($kf)
+  }
+  $move.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $j)
 }
 
 # ---------- 提示条 ----------
@@ -928,6 +1087,7 @@ $ui.Add_Tick({
 
     $st = $script:LatestState
 
+    $specialMotion = ''
     if ($st -ne $script:LastState) {
       $prev = $script:LastState
       $script:LastState = $st
@@ -935,12 +1095,13 @@ $ui.Add_Tick({
       if ($st -eq 'done') {
         Show-Bubble-TaskDone
         [System.Media.SystemSounds]::Asterisk.Play()
-        Hop
+        $specialMotion = 'hop'
       } elseif ($st -eq 'error') {
         Show-Bubble-TaskError
         [System.Media.SystemSounds]::Hand.Play()
+        $specialMotion = 'shake'
       } elseif ($st -eq 'pat') {
-        Squash
+        $specialMotion = 'squash'
       }
     }
 
@@ -950,28 +1111,45 @@ $ui.Add_Tick({
       $poseActive = ([DateTime]::Now -lt $script:PoseUntil)
       $exprActive = ([DateTime]::Now -lt $script:ExprUntil)
       $toastUp = ($script:ToastUntil -ne [DateTime]::MinValue)
-      if ($script:Outfit -eq 'default' -and -not $poseActive -and -not $exprActive -and [DateTime]::Now -ge $script:NextExpr) {
+      if (-not $poseActive -and -not $exprActive -and [DateTime]::Now -ge $script:NextExpr) {
         $script:ExprName = Get-Random -InputObject @('laugh', 'shy', 'sleepy')
         $script:ExprUntil = [DateTime]::Now.AddMilliseconds(1900)
         $script:NextExpr = [DateTime]::Now.AddSeconds(18 + (Get-Random -Minimum 0 -Maximum 32))
+        $exprActive = $true
       }
-      if ($script:Outfit -eq 'default' -and -not $toastUp -and -not $exprActive -and [DateTime]::Now -ge $script:NextPose) {
+      if (-not $toastUp -and -not $exprActive -and [DateTime]::Now -ge $script:NextPose) {
         $script:PoseName = Get-Random -InputObject @('stretch', 'wave', 'lookback', 'play_tail')
         $script:PoseUntil = [DateTime]::Now.AddMilliseconds(2600 + (Get-Random -Minimum 0 -Maximum 1000))
-        $script:NextPose = [DateTime]::Now.AddSeconds(35 + (Get-Random -Minimum 0 -Maximum 55))
+        $script:NextPose = [DateTime]::Now.AddSeconds(28 + (Get-Random -Minimum 0 -Maximum 45))
       }
-      if ($script:Outfit -eq 'default' -and [DateTime]::Now -lt $script:ExprUntil) {
-        $show = 'expr_' + $script:ExprName
-      }
-      if ($script:Outfit -eq 'default' -and [DateTime]::Now -lt $script:PoseUntil) {
-        $show = 'pose_' + $script:PoseName
-      }
-      if ([DateTime]::Now -ge $script:NextBlink) {
+      # 动作优先级：姿势 > 表情 > 眨眼；动作期间不让眨眼贴图把动作帧盖掉。
+      $poseActive = ([DateTime]::Now -lt $script:PoseUntil)
+      $exprActive = ([DateTime]::Now -lt $script:ExprUntil)
+      if (-not $poseActive -and -not $exprActive -and [DateTime]::Now -ge $script:NextBlink) {
         $script:BlinkUntil = [DateTime]::Now.AddMilliseconds(110)
         $script:NextBlink = [DateTime]::Now.AddSeconds(3 + (Get-Random -Minimum 0 -Maximum 35) / 10)
       }
-      if ([DateTime]::Now -lt $script:BlinkUntil) { $show = 'blink' }
+      if ($poseActive) {
+        $show = 'pose_' + $script:PoseName
+      } elseif ($exprActive) {
+        $show = 'expr_' + $script:ExprName
+      } elseif ([DateTime]::Now -lt $script:BlinkUntil) {
+        $show = 'blink'
+      }
     }
+    # 贴图之外再给窗口一层低成本程序动作。特殊动作期间不重写同一变换通道，避免下一 tick 截断跳跃/抖动/压缩。
+    $specialActive = ($script:SpecialStarted -and [DateTime]::Now -lt $script:SpecialUntil)
+    if (-not $specialActive) {
+      if ($script:SpecialStarted) {
+        $script:SpecialStarted = $false
+        $script:SpecialKind = ''
+        try { Start-Breathe } catch { }
+      }
+      try { Start-ActionMotion $show } catch { }
+    }
+    if ($specialMotion -eq 'hop') { try { Hop } catch { } }
+    elseif ($specialMotion -eq 'shake') { try { Shake } catch { } }
+    elseif ($specialMotion -eq 'squash') { try { Squash } catch { } }
     Set-Frame $show
 
     if ($script:ToastUntil -ne [DateTime]::MinValue -and [DateTime]::Now -gt $script:ToastUntil) {

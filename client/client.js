@@ -10,11 +10,11 @@
  */
 
 window.__ModuleLoader__.load({
-  id: 'ivan-pet-desktop',
+  id: 'dsh-ivan-pet-desktop',
   factory: (require) => {
     const module = { exports: {} };
     
-    module.exports.name = 'ivan-pet-desktop';
+    module.exports.name = 'dsh-ivan-pet-desktop';
     module.exports.inject = [];
     
     module.exports.apply = function(ctx) {
